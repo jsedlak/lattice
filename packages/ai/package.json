@@ -1,0 +1,25 @@
+{
+  "name": "@lattice/ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@ai-sdk/gateway": "^4.0.4",
+    "@lattice/db": "workspace:*",
+    "ai": "^7.0.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@lattice/config": "workspace:*",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

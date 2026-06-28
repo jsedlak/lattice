@@ -1,0 +1,19 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Build-script approvals. canvas/sharp/protobufjs aren't needed for
+# dev/typecheck/test (and canvas would compile from source); decline them.
+# esbuild's postinstall just verifies its prebuilt binary (used by vitest/tsx).
+allowBuilds:
+  canvas: false
+  esbuild: true
+  protobufjs: false
+  sharp: false
+
+minimumReleaseAgeExclude:
+  - '@ai-sdk/gateway@4.0.4'
+  - '@ai-sdk/mcp@2.0.3'
+  - '@ai-sdk/provider-utils@5.0.1'
+  - '@ai-sdk/react@4.0.5'
+  - ai@7.0.4

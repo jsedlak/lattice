@@ -1,0 +1,34 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1782608846179,
+      "tag": "0000_mysterious_viper",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1782652116853,
+      "tag": "0001_wise_angel",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1782652827175,
+      "tag": "0002_useful_venom",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1782653709143,
+      "tag": "0003_dapper_emma_frost",
+      "breakpoints": true
+    }
+  ]
+}
