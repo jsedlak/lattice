@@ -1,6 +1,6 @@
 [package]
 name = "lattice-desktop"
-version = "0.2.0"
+version = "0.2.1"
 description = "Lattice desktop — local-first knowledge graph second brain"
 edition = "2021"
 rust-version = "1.82"
