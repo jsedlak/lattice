@@ -1,0 +1,75 @@
+name: Warm build cache
+
+# Compiles the Rust dependency tree on main so release (tag) builds start from
+# a hot cache — tag runs can only restore caches saved on the default branch.
+# Dependency artifacts only change when the manifest/lockfile does, so this
+# runs rarely. Run it manually (workflow_dispatch) once after adding it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src-desktop/src-tauri/Cargo.toml"
+      - "src-desktop/src-tauri/Cargo.lock"
+      - ".github/workflows/cache-warm.yml"
+  workflow_dispatch:
+
+jobs:
+  warm:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+          - platform: macos-latest
+          - platform: windows-latest
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: src-desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-desktop/src-tauri
+
+      # generate_context! needs the frontendDist dir to exist at compile time.
+      - name: Build frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+        working-directory: src-desktop
+
+      # Same target layout the release build uses: plain host build on
+      # Linux/Windows, both halves of the universal binary on macOS.
+      - name: Compile (host)
+        if: matrix.platform != 'macos-latest'
+        run: cargo build --release
+        working-directory: src-desktop/src-tauri
+
+      - name: Compile (macOS universal halves)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+        working-directory: src-desktop/src-tauri
