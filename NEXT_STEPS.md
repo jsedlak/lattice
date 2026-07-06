@@ -42,7 +42,7 @@ Model access goes through the **Vercel AI Gateway** — one credential reaches e
 1. Create an Inngest app; set `INNGEST_EVENT_KEY` and `INNGEST_SIGNING_KEY`.
 2. **Local dev:** run the Inngest dev server alongside the app so uploads/saves actually process:
    ```bash
-   npx inngest-cli@latest dev -u http://localhost:3000/api/inngest
+   pnpm inngest
    ```
 3. **Production:** point your Inngest app at `https://<your-domain>/api/inngest`.
 
@@ -50,7 +50,7 @@ Model access goes through the **Vercel AI Gateway** — one credential reaches e
 ```bash
 pnpm dev                 # all packages; web on http://localhost:3000
 # in another terminal, for ingestion to run locally:
-npx inngest-cli@latest dev -u http://localhost:3000/api/inngest
+pnpm inngest
 ```
 Sign up → create a note with `#tags` and `[[wiki-links]]` → open Graph → upload a PDF → ask the Assistant.
 

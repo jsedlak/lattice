@@ -39,7 +39,7 @@ cp .env.example .env          # then fill it in — see NEXT_STEPS.md
 pnpm --filter @lattice/db db:migrate
 pnpm dev                      # http://localhost:3000
 # for ingestion locally:
-npx inngest-cli@latest dev -u http://localhost:3000/api/inngest
+pnpm inngest
 ```
 
 Full setup (Neon, GitHub OAuth, AI keys, Blob, Inngest, deploy) is in **[NEXT_STEPS.md](./NEXT_STEPS.md)**.

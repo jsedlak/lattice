@@ -1,0 +1,11 @@
+# Marks src-desktop as its own workspace root so pnpm never walks up into the
+# cortex monorepo — this app is maintained separately.
+packages:
+  - "."
+
+# Build-script approvals: esbuild's postinstall just verifies its prebuilt
+# binary; canvas (optional dep of pdfjs via unpdf) would compile from source
+# and isn't needed in a webview.
+allowBuilds:
+  esbuild: true
+  canvas: false
