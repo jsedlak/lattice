@@ -5,10 +5,8 @@ name: Release
 # (a dry run for the packaging itself).
 #
 # Release flow:
-#   1. bump `version` in src-desktop/src-tauri/tauri.conf.json (and
-#      src-desktop/package.json to match)
-#   2. commit, then: git tag v0.2.0 && git push origin v0.2.0
-#   3. publish the draft release that appears on GitHub once all jobs finish
+#   ./scripts/release.sh 0.2.0   # bump + commit + tag + push
+# then publish the draft release once all jobs finish.
 on:
   push:
     tags: ["v*"]
@@ -18,7 +16,72 @@ permissions:
   contents: write
 
 jobs:
+  # Creates the draft release up front — with a changelog generated from the
+  # commits since the previous tag — so the build jobs upload into one
+  # authoritative release instead of racing to create it.
+  create-release:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.result }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the changelog can diff against the previous tag
+
+      - name: Verify tag matches app version
+        run: |
+          APP_VERSION=$(node -p "require('./src-desktop/src-tauri/tauri.conf.json').version")
+          if [ "v$APP_VERSION" != "${{ github.ref_name }}" ]; then
+            echo "Tag ${{ github.ref_name }} does not match tauri.conf.json version v$APP_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build release notes
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${{ github.ref_name }}^" 2>/dev/null || true)
+          {
+            echo "## Installers"
+            echo
+            echo "| Platform | File |"
+            echo "|---|---|"
+            echo "| Ubuntu / Debian | \`.deb\` |"
+            echo "| Other Linux | \`.AppImage\` (portable), \`.rpm\` |"
+            echo "| macOS (Apple Silicon + Intel) | \`.dmg\` |"
+            echo "| Windows | \`.msi\` or \`.exe\` |"
+            echo
+            echo "## Changes"
+            echo
+            if [ -n "$PREV" ]; then
+              git log --pretty="- %s" "$PREV..${{ github.ref_name }}"
+            else
+              git log --pretty="- %s" "${{ github.ref_name }}"
+            fi
+          } > /tmp/notes.md
+          cat /tmp/notes.md
+
+      - name: Create draft release
+        id: create
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: process.env.GITHUB_REF_NAME,
+              name: `Lattice ${process.env.GITHUB_REF_NAME}`,
+              body: fs.readFileSync("/tmp/notes.md", "utf8"),
+              draft: true,
+              prerelease: false,
+            });
+            return data.id;
+
   build:
+    needs: create-release
+    # Run even when create-release is skipped (workflow_dispatch dry run),
+    # but not when it failed or was cancelled.
+    if: ${{ !failure() && !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -36,16 +99,6 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Verify tag matches app version
-        if: github.ref_type == 'tag'
-        shell: bash
-        run: |
-          APP_VERSION=$(node -p "require('./src-desktop/src-tauri/tauri.conf.json').version")
-          if [ "v$APP_VERSION" != "${{ github.ref_name }}" ]; then
-            echo "Tag ${{ github.ref_name }} does not match tauri.conf.json version v$APP_VERSION" >&2
-            exit 1
-          fi
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -84,16 +137,12 @@ jobs:
         run: pnpm install --frozen-lockfile
         working-directory: src-desktop
 
-      - name: Build and publish
+      - name: Build and upload to release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: src-desktop
-          # Only cut a release for tag pushes; plain dispatch just builds.
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          releaseName: ${{ github.ref_type == 'tag' && format('Lattice {0}', github.ref_name) || '' }}
-          releaseBody: "Download the installer for your platform below."
-          releaseDraft: true
-          prerelease: false
+          # Empty on workflow_dispatch: build only, no release upload.
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}
