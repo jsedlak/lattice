@@ -1,5 +1,5 @@
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
-import { EditorView } from "@codemirror/view";
+import { EditorView, placeholder } from "@codemirror/view";
 import {
   Decoration,
   type DecorationSet,
@@ -43,9 +43,11 @@ export function latticeEditorExtensions() {
     markdown({ base: markdownLanguage }),
     latticeDecorations,
     EditorView.lineWrapping,
+    placeholder("Start writing…"),
     EditorView.theme({
       "&": { backgroundColor: "transparent", height: "100%" },
       ".cm-scroller": { fontFamily: "var(--font-mono)" },
+      ".cm-placeholder": { color: "var(--faint)" },
     }),
   ];
 }

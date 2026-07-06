@@ -5,7 +5,13 @@ import { CheckCircle2, KeyRound, XCircle } from "lucide-react";
 import { Button, Input, Spinner, useConfirm } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import * as ipc from "@/lib/ipc";
-import type { AppSettings, EndpointConfig, ProviderKind, SecretName } from "@/lib/types";
+import type {
+  AppSettings,
+  EditorChoice,
+  EndpointConfig,
+  ProviderKind,
+  SecretName,
+} from "@/lib/types";
 import { DEFAULT_SETTINGS } from "@/lib/types";
 import { languageModelFor } from "@/lib/ai/providers";
 import { invalidateAiSettings, loadSettings, requiresApiKey, saveSettings } from "@/lib/ai/settings";
@@ -31,6 +37,11 @@ const EMBEDDING_PLACEHOLDERS: Record<ProviderKind, string> = {
   anthropic: "— no embedding models —",
   "openai-compatible": "nomic-embed-text",
 };
+
+const EDITOR_OPTIONS: { value: EditorChoice; label: string; hint: string }[] = [
+  { value: "monaco", label: "Monaco", hint: "VS Code's editor — default" },
+  { value: "codemirror", label: "CodeMirror", hint: "lightweight alternative" },
+];
 
 type TestState = { status: "idle" | "running" | "ok" | "fail"; detail?: string };
 
@@ -300,6 +311,30 @@ export function SettingsScreen() {
             }
           />
         </div>
+
+        <section className="mt-6 rounded-lg border border-border bg-surface p-5">
+          <h2 className="text-sm font-semibold">Markdown editor</h2>
+          <p className="mt-0.5 text-xs text-muted">
+            The engine behind the note editor. Takes effect the next time a note opens.
+          </p>
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {EDITOR_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setSettings({ ...settings, editor: opt.value })}
+                className={cn(
+                  "rounded-md border px-3 py-2 text-left transition-colors",
+                  settings.editor === opt.value
+                    ? "border-accent bg-surface-raised"
+                    : "border-border hover:border-border-strong",
+                )}
+              >
+                <div className="text-[13px] font-medium">{opt.label}</div>
+                <div className="mt-0.5 text-[11px] text-muted">{opt.hint}</div>
+              </button>
+            ))}
+          </div>
+        </section>
 
         <div className="mt-6 flex items-center gap-3">
           <Button onClick={() => void save()} disabled={saving}>

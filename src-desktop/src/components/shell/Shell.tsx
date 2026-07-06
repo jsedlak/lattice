@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   Bot,
   FileText,
@@ -11,6 +11,8 @@ import {
 import { ConfirmProvider, Logo, ThemeToggle } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { resumePendingIngest } from "@/lib/ingest/pipeline";
+import { listDocuments } from "@/lib/ipc";
+import type { Doc } from "@/lib/types";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
@@ -19,11 +21,29 @@ const NAV = [
   { to: "/assistant", label: "Assistant", icon: Bot, end: false },
 ] as const;
 
+const RECENT_COUNT = 5;
+
 export function Shell() {
+  const location = useLocation();
+  const [recent, setRecent] = useState<Doc[]>([]);
+
   useEffect(() => {
     // Pick up ingest work left queued/processing by a previous session.
     void resumePendingIngest();
   }, []);
+
+  // Refresh the Recent list on every navigation — edits elsewhere bump
+  // updated_at, and navigation is when the list can go stale.
+  useEffect(() => {
+    void listDocuments().then((docs) =>
+      setRecent(
+        docs
+          .slice()
+          .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+          .slice(0, RECENT_COUNT),
+      ),
+    );
+  }, [location.key]);
 
   return (
     <ConfirmProvider>
@@ -41,7 +61,7 @@ export function Shell() {
                 end={end}
                 className={({ isActive }) =>
                   cn(
-                    "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] font-medium transition-colors",
+                    "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 font-medium transition-colors",
                     isActive
                       ? "bg-surface-raised text-foreground"
                       : "text-muted hover:bg-surface-raised/60 hover:text-foreground",
@@ -54,12 +74,38 @@ export function Shell() {
             ))}
           </nav>
 
-          <div className="mt-auto flex items-center justify-between border-t border-border px-3 py-2.5">
+          {recent.length > 0 && (
+            <div className="mt-6 min-h-0 overflow-y-auto px-2">
+              <div className="px-2.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-faint">
+                Recent
+              </div>
+              {recent.map((doc) => (
+                <NavLink
+                  key={doc.id}
+                  to={`/editor/${doc.id}`}
+                  className={({ isActive }) =>
+                    cn(
+                      "flex items-center gap-2.5 truncate rounded-md px-2.5 py-1.5 transition-colors",
+                      isActive
+                        ? "bg-surface-raised text-foreground"
+                        : "text-muted hover:bg-surface-raised/60 hover:text-foreground",
+                    )
+                  }
+                >
+                  <FileText className="h-3.5 w-3.5 shrink-0 text-faint" strokeWidth={1.75} />
+                  <span className="truncate">{doc.title}</span>
+                </NavLink>
+              ))}
+            </div>
+          )}
+
+          {/* Footer — h-[52px] matches the document sidebar's footer so the top borders align. */}
+          <div className="mt-auto flex h-[52px] shrink-0 items-center justify-between border-t border-border px-3">
             <NavLink
               to="/settings"
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] font-medium transition-colors",
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 font-medium transition-colors",
                   isActive
                     ? "bg-surface-raised text-foreground"
                     : "text-muted hover:text-foreground",

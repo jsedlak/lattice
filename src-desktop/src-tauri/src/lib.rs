@@ -48,6 +48,8 @@ pub fn run() {
             commands::docs::create_folder,
             commands::docs::rename_folder,
             commands::docs::delete_folder,
+            commands::docs::reorder_documents,
+            commands::docs::reorder_folders,
             commands::docs::import_upload,
             commands::docs::read_upload_bytes,
             // graph, chunks, entities

@@ -15,7 +15,7 @@ import { cn } from "@/lib/cn";
 import { createFolder, createNote, deleteDocument } from "@/lib/ipc";
 import type { Doc, Folder, IngestStatus } from "@/lib/types";
 
-import { DocumentTree } from "./DocumentTree";
+import { DocumentTree, type RenameRequest } from "./DocumentTree";
 import { UploadButton } from "./UploadButton";
 
 export type EditorTab = "documents" | "uploads";
@@ -35,6 +35,9 @@ export function DocumentTabs({
 }) {
   const navigate = useNavigate();
   const [creating, setCreating] = React.useState(false);
+  // New items get named inline in the tree: create → focus a rename input.
+  const [renameRequest, setRenameRequest] = React.useState<RenameRequest | null>(null);
+  const onRenameRequestHandled = React.useCallback(() => setRenameRequest(null), []);
 
   const notes = documents.filter((d) => d.kind === "note");
   const uploads = documents.filter((d) => d.kind === "upload");
@@ -44,6 +47,7 @@ export function DocumentTabs({
     try {
       const document = await createNote("Untitled note");
       navigate(`/editor/${document.id}`);
+      setRenameRequest({ kind: "doc", id: document.id });
       onRefresh();
     } finally {
       setCreating(false);
@@ -51,14 +55,15 @@ export function DocumentTabs({
   }
 
   async function onNewFolder() {
-    await createFolder("New folder", null);
+    const folder = await createFolder("New folder", null);
+    setRenameRequest({ kind: "folder", id: folder.id });
     onRefresh();
   }
 
   return (
     <div className="flex h-full w-72 shrink-0 flex-col border-r border-border bg-surface">
-      {/* Tabs */}
-      <div className="flex border-b border-border">
+      {/* Tabs — h-12 matches the document header so the bottom borders align. */}
+      <div className="flex h-12 shrink-0 border-b border-border">
         <TabLink active={tab === "documents"} to="/editor?tab=documents" label="Documents" />
         <TabLink active={tab === "uploads"} to="/editor?tab=uploads" label="Uploads" />
       </div>
@@ -69,6 +74,8 @@ export function DocumentTabs({
             documents={notes}
             folders={folders}
             selectedId={selectedId}
+            renameRequest={renameRequest}
+            onRenameRequestHandled={onRenameRequestHandled}
             onRefresh={onRefresh}
           />
         ) : (
@@ -81,14 +88,15 @@ export function DocumentTabs({
         )}
       </div>
 
-      <div className="border-t border-border p-2">
+      {/* Footer — h-[52px] matches the main sidebar's footer so the top borders align. */}
+      <div className="flex h-[52px] shrink-0 items-center border-t border-border px-2">
         {tab === "documents" ? (
-          <div className="flex gap-2">
+          <div className="flex w-full gap-2">
             <button
               type="button"
               onClick={onNewNote}
               disabled={creating}
-              className="flex flex-1 items-center justify-center gap-2 rounded-md border border-dashed border-border-strong py-2  text-muted hover:bg-surface-raised hover:text-foreground"
+              className="flex flex-1 items-center justify-center gap-2 rounded-md border border-dashed border-border-strong py-1.5  text-muted hover:bg-surface-raised hover:text-foreground"
             >
               {creating ? <Spinner className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
               New note
@@ -104,7 +112,7 @@ export function DocumentTabs({
             </button>
           </div>
         ) : (
-          <UploadButton onRefresh={onRefresh} />
+          <UploadButton className="w-full" onRefresh={onRefresh} />
         )}
       </div>
     </div>
@@ -116,7 +124,7 @@ function TabLink({ active, to, label }: { active: boolean; to: string; label: st
     <Link
       to={to}
       className={cn(
-        "border-b-2 px-3 py-2.5 text-center flex-1 transition-colors",
+        "flex flex-1 items-center justify-center border-b-2 px-3 transition-colors",
         active
           ? "border-accent font-medium text-foreground bg-surface-raised"
           : "border-transparent text-muted hover:text-foreground",

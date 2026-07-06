@@ -25,12 +25,14 @@ pub struct Doc {
     pub page_count: Option<i64>,
     pub ingest_status: String,
     pub ingest_error: Option<String>,
+    pub sort_order: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 const DOC_COLS: &str = "id, kind, title, content, folder_id, file_path, mime_type, byte_size, \
-                        page_count, ingest_status, ingest_error, created_at, updated_at";
+                        page_count, ingest_status, ingest_error, sort_order, created_at, \
+                        updated_at";
 
 fn doc_from_row(r: &Row) -> rusqlite::Result<Doc> {
     Ok(Doc {
@@ -45,8 +47,9 @@ fn doc_from_row(r: &Row) -> rusqlite::Result<Doc> {
         page_count: r.get(8)?,
         ingest_status: r.get(9)?,
         ingest_error: r.get(10)?,
-        created_at: r.get(11)?,
-        updated_at: r.get(12)?,
+        sort_order: r.get(11)?,
+        created_at: r.get(12)?,
+        updated_at: r.get(13)?,
     })
 }
 
@@ -62,9 +65,11 @@ fn get_doc(conn: &Connection, id: &str) -> rusqlite::Result<Option<Doc>> {
 #[tauri::command]
 pub fn list_documents(state: State<AppState>, kind: Option<String>) -> CmdResult<Vec<Doc>> {
     let conn = state.db.lock();
+    // Manual order first (tree drag-reorder), most recently touched otherwise.
+    const ORDER: &str = "ORDER BY sort_order IS NULL, sort_order, updated_at DESC";
     let sql = match kind {
-        Some(_) => format!("SELECT {DOC_COLS} FROM document WHERE kind = ?1 ORDER BY updated_at DESC"),
-        None => format!("SELECT {DOC_COLS} FROM document ORDER BY updated_at DESC"),
+        Some(_) => format!("SELECT {DOC_COLS} FROM document WHERE kind = ?1 {ORDER}"),
+        None => format!("SELECT {DOC_COLS} FROM document {ORDER}"),
     };
     let mut stmt = conn.prepare(&sql).map_err(err)?;
     let rows = match kind {
@@ -102,8 +107,10 @@ pub fn create_note(
     let conn = state.db.lock();
     let (id, ts) = (new_id(), now());
     conn.execute(
-        "INSERT INTO document (id, kind, title, content, folder_id, created_at, updated_at)
-         VALUES (?1, 'note', ?2, ?3, ?4, ?5, ?5)",
+        "INSERT INTO document (id, kind, title, content, folder_id, sort_order, created_at, updated_at)
+         VALUES (?1, 'note', ?2, ?3, ?4,
+                 (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM document WHERE folder_id IS ?4),
+                 ?5, ?5)",
         params![id, title, content, folder_id, ts],
     )
     .map_err(err)?;
@@ -124,8 +131,18 @@ pub fn update_document(
     let new_folder = if clear_folder.unwrap_or(false) {
         None
     } else {
-        folder_id.or(existing.folder_id)
+        folder_id.or(existing.folder_id.clone())
     };
+    // Moving between folders appends to the destination's manual order.
+    if new_folder != existing.folder_id {
+        conn.execute(
+            "UPDATE document SET sort_order =
+                 (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM document WHERE folder_id IS ?2)
+             WHERE id = ?1",
+            params![id, new_folder],
+        )
+        .map_err(err)?;
+    }
     conn.execute(
         "UPDATE document SET title = ?2, content = ?3, folder_id = ?4, updated_at = ?5 WHERE id = ?1",
         params![
@@ -193,6 +210,7 @@ pub struct Folder {
     pub id: String,
     pub name: String,
     pub parent_id: Option<String>,
+    pub sort_order: Option<i64>,
     pub created_at: String,
 }
 
@@ -200,7 +218,10 @@ pub struct Folder {
 pub fn list_folders(state: State<AppState>) -> CmdResult<Vec<Folder>> {
     let conn = state.db.lock();
     let mut stmt = conn
-        .prepare("SELECT id, name, parent_id, created_at FROM folder ORDER BY name")
+        .prepare(
+            "SELECT id, name, parent_id, sort_order, created_at FROM folder
+             ORDER BY sort_order IS NULL, sort_order, name",
+        )
         .map_err(err)?;
     let rows = stmt
         .query_map([], |r| {
@@ -208,7 +229,8 @@ pub fn list_folders(state: State<AppState>) -> CmdResult<Vec<Folder>> {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 parent_id: r.get(2)?,
-                created_at: r.get(3)?,
+                sort_order: r.get(3)?,
+                created_at: r.get(4)?,
             })
         })
         .map_err(err)?;
@@ -221,16 +243,60 @@ pub fn create_folder(
     name: String,
     parent_id: Option<String>,
 ) -> CmdResult<Folder> {
+    let conn = state.db.lock();
     let (id, ts) = (new_id(), now());
-    state
-        .db
-        .lock()
-        .execute(
-            "INSERT INTO folder (id, name, parent_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![id, name, parent_id, ts],
+    conn.execute(
+        "INSERT INTO folder (id, name, parent_id, sort_order, created_at)
+         VALUES (?1, ?2, ?3,
+                 (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM folder WHERE parent_id IS ?3),
+                 ?4)",
+        params![id, name, parent_id, ts],
+    )
+    .map_err(err)?;
+    let sort_order = conn
+        .query_row("SELECT sort_order FROM folder WHERE id = ?1", [&id], |r| r.get(0))
+        .map_err(err)?;
+    Ok(Folder { id, name, parent_id, sort_order, created_at: ts })
+}
+
+/// Rewrites the manual order (and containment) of notes in one folder: each id
+/// gets sort_order = its index and folder_id = `folder_id`. The client sends
+/// the full sibling list after a drag.
+#[tauri::command]
+pub fn reorder_documents(
+    state: State<AppState>,
+    folder_id: Option<String>,
+    ids: Vec<String>,
+) -> CmdResult<()> {
+    let conn = state.db.lock();
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    for (i, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE document SET folder_id = ?2, sort_order = ?3 WHERE id = ?1",
+            params![id, folder_id, i as i64],
         )
         .map_err(err)?;
-    Ok(Folder { id, name, parent_id, created_at: ts })
+    }
+    tx.commit().map_err(err)
+}
+
+/// Same as reorder_documents, for folders within one parent.
+#[tauri::command]
+pub fn reorder_folders(
+    state: State<AppState>,
+    parent_id: Option<String>,
+    ids: Vec<String>,
+) -> CmdResult<()> {
+    let conn = state.db.lock();
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    for (i, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE folder SET parent_id = ?2, sort_order = ?3 WHERE id = ?1",
+            params![id, parent_id, i as i64],
+        )
+        .map_err(err)?;
+    }
+    tx.commit().map_err(err)
 }
 
 #[tauri::command]

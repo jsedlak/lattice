@@ -69,6 +69,14 @@ export const renameFolder = (id: string, name: string) =>
   invoke<void>("rename_folder", { id, name });
 export const deleteFolder = (id: string) => invoke<void>("delete_folder", { id });
 
+/** Rewrites the manual order of the notes in one folder (drag-reorder). */
+export const reorderDocuments = (folderId: string | null, ids: string[]) =>
+  invoke<void>("reorder_documents", { folderId, ids });
+
+/** Rewrites the manual order of the folders under one parent (drag-reorder). */
+export const reorderFolders = (parentId: string | null, ids: string[]) =>
+  invoke<void>("reorder_folders", { parentId, ids });
+
 // ── Graph ────────────────────────────────────────────────────────────────────
 
 export const getGraph = (types?: NodeType[], origin?: EdgeOrigin) =>

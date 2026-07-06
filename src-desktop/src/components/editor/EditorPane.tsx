@@ -1,16 +1,18 @@
 import CodeMirror from "@uiw/react-codemirror";
-import { Check, Loader2, MessageSquare } from "lucide-react";
+import { Check, Columns2, Loader2, MessageSquare } from "lucide-react";
 import { useTheme } from "next-themes";
 import * as React from "react";
 import { Link } from "react-router-dom";
 
 import { MarkdownPreview } from "@/components/editor/MarkdownPreview";
+import { MonacoMarkdown } from "@/components/editor/MonacoMarkdown";
 import { cn } from "@/lib/cn";
+import { loadSettings } from "@/lib/ai/settings";
 import { latticeEditorExtensions } from "@/lib/codemirror-lattice";
 import { buildDeterministic } from "@/lib/graph-build";
 import { enqueueIngest } from "@/lib/ingest/pipeline";
 import { updateDocument } from "@/lib/ipc";
-import type { Doc } from "@/lib/types";
+import type { Doc, EditorChoice } from "@/lib/types";
 
 type SaveState = "idle" | "saving" | "saved";
 
@@ -26,6 +28,11 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
   const [content, setContent] = React.useState(doc.content);
   const [save, setSave] = React.useState<SaveState>("idle");
   const [showPreview, setShowPreview] = React.useState(true);
+  const [editorChoice, setEditorChoice] = React.useState<EditorChoice | null>(null);
+
+  React.useEffect(() => {
+    void loadSettings().then((s) => setEditorChoice(s.editor));
+  }, []);
   const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   // Last title we refreshed the sidebar tree for. The parent renders this
   // component with key={doc.id}, so it remounts (with fresh state) when the
@@ -89,8 +96,8 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header */}
-      <div className="flex items-center gap-3 border-b border-border px-4 py-2.5">
+      {/* Header — h-12 matches the sidebar's tab bar so the bottom borders align. */}
+      <div className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-4">
         <input
           value={title}
           onChange={(e) => {
@@ -105,11 +112,15 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         <button
           type="button"
           onClick={() => setShowPreview((v) => !v)}
+          title="Toggle preview (Ctrl+P)"
+          aria-pressed={showPreview}
           className={cn(
-            "rounded-md px-2 py-1 ",
-            showPreview ? "bg-surface-raised text-foreground" : "text-muted hover:text-foreground",
+            outlineSmLink,
+            "gap-1.5",
+            showPreview && "border-accent/50 bg-accent/10 text-accent hover:bg-accent/15",
           )}
         >
+          <Columns2 className="h-3.5 w-3.5" />
           Preview
         </button>
         <Link to={`/assistant?doc=${doc.id}`} className={cn(outlineSmLink, "gap-1.5")}>
@@ -120,32 +131,45 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
 
       {/* Split */}
       <div className="flex min-h-0 flex-1">
+        {/* Full-bleed editing surface: the surface bg marks the editable area
+            even when the note is empty. Absolute inset gives the editor a
+            definite pixel height — flex percentage chains collapse in
+            WebKitGTK. */}
         <div
           className={cn(
-            "min-h-0 overflow-auto",
+            "relative min-h-0 bg-surface",
             showPreview ? "w-1/2 border-r border-border" : "w-full",
           )}
         >
-          <div className="px-4 py-3">
-            <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-faint">
-              Markdown
-            </div>
-            <CodeMirror
-              value={content}
-              theme={resolvedTheme === "light" ? "light" : "dark"}
-              extensions={latticeEditorExtensions()}
-              basicSetup={{
-                lineNumbers: false,
-                foldGutter: false,
-                highlightActiveLine: true,
-                highlightActiveLineGutter: false,
-              }}
-              onChange={(val) => {
-                setContent(val);
-                scheduleSave({ title, content: val });
-              }}
-            />
-          </div>
+            {editorChoice === "codemirror" ? (
+              <CodeMirror
+                value={content}
+                height="100%"
+                className="absolute inset-0 px-2 py-1"
+                theme={resolvedTheme === "light" ? "light" : "dark"}
+                extensions={latticeEditorExtensions()}
+                basicSetup={{
+                  lineNumbers: false,
+                  foldGutter: false,
+                  highlightActiveLine: true,
+                  highlightActiveLineGutter: false,
+                }}
+                onChange={(val) => {
+                  setContent(val);
+                  scheduleSave({ title, content: val });
+                }}
+              />
+            ) : editorChoice === "monaco" ? (
+              <MonacoMarkdown
+                value={content}
+                theme={resolvedTheme}
+                className="absolute inset-0 pl-1 pt-1"
+                onChange={(val) => {
+                  setContent(val);
+                  scheduleSave({ title, content: val });
+                }}
+              />
+            ) : null}
         </div>
         {showPreview && (
           <div className="min-h-0 w-1/2 overflow-auto px-6 py-3">

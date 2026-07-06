@@ -22,6 +22,8 @@ export interface Doc {
   pageCount: number | null;
   ingestStatus: IngestStatus;
   ingestError: string | null;
+  /** manual position within its folder (drag-reorder); null = unordered. */
+  sortOrder: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -30,6 +32,8 @@ export interface Folder {
   id: string;
   name: string;
   parentId: string | null;
+  /** manual position within its parent (drag-reorder); null = unordered. */
+  sortOrder: number | null;
   createdAt: string;
 }
 
@@ -145,17 +149,22 @@ export interface EndpointConfig {
   baseUrl?: string;
 }
 
+/** Markdown editor engine for the note editor. */
+export type EditorChoice = "monaco" | "codemirror";
+
 export interface AppSettings {
   chat: EndpointConfig;
   embedding: EndpointConfig & {
     /** vector dimension of the embedding model; changing it requires re-embedding. */
     dimensions: number;
   };
+  editor: EditorChoice;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   chat: { kind: "gateway", model: "anthropic/claude-opus-4-8" },
   embedding: { kind: "gateway", model: "openai/text-embedding-3-small", dimensions: 1536 },
+  editor: "monaco",
 };
 
 /** Keychain entry names (per role). */

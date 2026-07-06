@@ -106,9 +106,11 @@ export const GraphCanvas = React.forwardRef<
           selector: "edge",
           style: {
             width: 1,
-            "line-color": resolvedTheme === "light" ? "#d3d3cd" : "#262a31",
+            // --faint per theme: readable against the canvas, unlike the
+            // border grays (which are designed to be barely visible).
+            "line-color": resolvedTheme === "light" ? "#8a909a" : "#6e747e",
             "curve-style": "bezier",
-            opacity: showEdges ? 0.6 : 0,
+            opacity: showEdges ? 0.55 : 0,
           },
         },
         { selector: ".faded", style: { opacity: 0.12 } },

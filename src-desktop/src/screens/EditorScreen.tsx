@@ -97,7 +97,7 @@ export function EditorScreen() {
         tab={tab}
         onRefresh={onRefresh}
       />
-      <div className="min-w-0 flex-1">
+      <div className="h-full min-w-0 flex-1">
         {selected ? (
           selected.kind === "upload" ? (
             <UploadDetail key={selected.id} doc={selected} />

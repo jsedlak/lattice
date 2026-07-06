@@ -35,6 +35,7 @@ async function load(): Promise<Loaded> {
   const settings: AppSettings = {
     chat: { ...DEFAULT_SETTINGS.chat, ...(raw?.chat ?? {}) },
     embedding: { ...DEFAULT_SETTINGS.embedding, ...(raw?.embedding ?? {}) },
+    editor: raw?.editor === "codemirror" ? "codemirror" : DEFAULT_SETTINGS.editor,
   };
   cache = { settings, chatApiKey, embeddingApiKey };
   return cache;

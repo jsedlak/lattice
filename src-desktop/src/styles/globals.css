@@ -94,6 +94,10 @@
   font-family: var(--font-mono);
   font-size: 13.5px;
   line-height: 1.7;
+  height: 100%;
+}
+.cm-editor .cm-scroller {
+  overflow: auto;
 }
 .cm-editor .cm-content {
   caret-color: var(--accent);
@@ -120,6 +124,16 @@
 .cm-editor .cm-activeLine,
 .cm-editor .cm-activeLineGutter {
   background-color: color-mix(in srgb, var(--foreground) 4%, transparent);
+}
+
+/* ── Editor (Monaco) ────────────────────────────────────────────────────────── */
+.monaco-lattice-tag {
+  color: var(--graph-tag) !important;
+  font-weight: 500;
+}
+.monaco-lattice-wikilink {
+  color: var(--graph-link) !important;
+  font-weight: 500;
 }
 
 /* ── Rendered markdown preview ──────────────────────────────────────────────── */

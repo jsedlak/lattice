@@ -36,6 +36,11 @@ pub fn open(path: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
 }
 
 fn migrate(conn: &Connection) -> SqlResult<()> {
+    // Databases created before sort_order existed: add the columns in place.
+    // (ALTER TABLE ADD COLUMN fails if the column exists — that's fine.)
+    let _ = conn.execute_batch("ALTER TABLE document ADD COLUMN sort_order INTEGER;");
+    let _ = conn.execute_batch("ALTER TABLE folder ADD COLUMN sort_order INTEGER;");
+
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS document (
@@ -51,6 +56,7 @@ fn migrate(conn: &Connection) -> SqlResult<()> {
             ingest_status TEXT NOT NULL DEFAULT 'idle'
                           CHECK (ingest_status IN ('idle','queued','processing','ready','error')),
             ingest_error  TEXT,
+            sort_order    INTEGER,
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL
         );
@@ -59,6 +65,7 @@ fn migrate(conn: &Connection) -> SqlResult<()> {
             id         TEXT PRIMARY KEY,
             name       TEXT NOT NULL,
             parent_id  TEXT,
+            sort_order INTEGER,
             created_at TEXT NOT NULL
         );
 
