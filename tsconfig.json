@@ -1,6 +1,24 @@
 {
-  "//": "Root tsconfig for editor/tooling convenience. Each package and app has its own tsconfig that extends packages/config/tsconfig.base.json. Next.js consumes workspace packages via transpilePackages, so we do NOT use composite project references here.",
-  "extends": "./packages/config/tsconfig.base.json",
-  "include": [],
-  "exclude": ["node_modules", "**/dist", "**/.next"]
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable", "WebWorker"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "useDefineForClassFields": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src"]
 }

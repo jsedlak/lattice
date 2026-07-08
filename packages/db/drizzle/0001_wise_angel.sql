@@ -1,1 +1,0 @@
-ALTER TABLE "document" ADD COLUMN "blob_url" text;

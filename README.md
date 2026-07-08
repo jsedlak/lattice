@@ -1,66 +1,64 @@
-# Lattice
+# Lattice Desktop
 
-**A single-user knowledge graph second brain.** Write markdown, upload documents, and Lattice weaves both into a queryable graph an AI assistant answers from — with citations back to your own notes.
+Local-first desktop version of Lattice for Linux and macOS. **Maintained
+separately** from the web monorepo above this directory: own lockfile, no
+`@lattice/*` dependencies — shared styles and parity-critical logic are
+*copied in* (look for `COPIED VERBATIM` / `PARITY` headers).
 
----
+Tauri v2: a Rust core owns SQLite (+ `sqlite-vec` KNN), upload file storage,
+and the OS keychain; the webview runs the React UI plus the proven TS pipeline
+logic (parsers, chunker, AI SDK). Design: `.plan/12-desktop-app.md` in the
+repo root.
 
-## What it does
+## Prerequisites
 
-- **Editor** — split-pane markdown with live preview, first-class `#tags` and `[[wiki-links]]`, debounced autosave.
-- **Documents & blobs** — authored notes (in Postgres) and uploaded files (PDF/docx/xlsx → private Vercel Blob), ingested into the graph.
-- **Knowledge graph** — deterministic tag/link edges + LLM-extracted entities (resolved/deduped by embedding similarity), rendered with Cytoscape.
-- **Assistant** — streaming chat with hybrid retrieval (graph traversal + pgvector semantic search) and clickable source citations.
-
-Everything is private and scoped per user.
-
-## Stack
-
-Turborepo · Next.js (App Router) · Neon Postgres + pgvector · Drizzle · BetterAuth · Vercel Blob · Inngest · Vercel AI SDK v7 via the **Vercel AI Gateway** (one credential for chat + embeddings; `provider/model` slugs, env-configurable) · Cytoscape · CodeMirror 6 · Tailwind.
-
-## Monorepo layout
-
-```
-apps/web            Next.js app — UI, route handlers, Inngest endpoint
-packages/
-  config            shared tsconfig, Tailwind preset, design tokens
-  db                Drizzle schema, client, user-scoped queries, migrations
-  auth              BetterAuth server/client
-  ai                provider factory, embeddings, chat tools, extraction, citations
-  graph             tag/wiki-link parsing, chunking, deterministic graph builder
-  ingest            Inngest client + functions (parse → chunk → embed → extract)
-  ui                design-system components, theme, logo
-```
-
-## Quick start
+- Node ≥ 20, pnpm
+- Rust (stable, via rustup)
+- Linux build deps (Debian/Ubuntu):
 
 ```bash
-pnpm install
-cp .env.example .env          # then fill it in — see NEXT_STEPS.md
-pnpm --filter @lattice/db db:migrate
-pnpm dev                      # http://localhost:3000
-# for ingestion locally:
-pnpm inngest
+sudo apt-get install libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-Full setup (Neon, GitHub OAuth, AI keys, Blob, Inngest, deploy) is in **[NEXT_STEPS.md](./NEXT_STEPS.md)**.
+macOS needs only Xcode command-line tools.
 
-## Project docs
-
-- **[.plan/](./.plan/)** — the phased implementation plan (the spec).
-- **[STATUS.md](./STATUS.md)** — what's built vs planned, per phase.
-- **[DECISIONS.md](./DECISIONS.md)** — choices made + open questions.
-- **[KNOWN_ISSUES.md](./KNOWN_ISSUES.md)** — gaps, risks, deferrals.
-
-## Commands
+## Develop / build
 
 ```bash
-pnpm dev            pnpm -r type-check     pnpm -r test
-pnpm --filter @lattice/web build
-pnpm --filter @lattice/db db:generate | db:migrate | db:studio
+pnpm install          # .npmrc pins ignore-workspace (standalone from the monorepo)
+pnpm tauri dev        # run the app (vite + cargo)
+pnpm tauri build      # bundle: .deb/.rpm/AppImage on Linux, .dmg on macOS
+pnpm type-check       # frontend only
 ```
 
-## Architecture notes
+## Where things live
 
-- **Isolation** is enforced in code: every query/route/Inngest function scopes to `userId`; blobs are private and namespaced; the authorization boundary is each handler (`requireUser`/`requireApiUser`), not middleware.
-- **Providers are swappable** via the `CHAT_MODEL` / `EMBEDDING_MODEL` slugs through the AI Gateway — the model is named in exactly one place (`packages/ai/src/providers.ts`).
-- **Graph = deterministic backbone + LLM enrichment.** Tags/wiki-links are the reliable skeleton; entity extraction enriches it. Deterministic edges win on conflict.
+- **Data**: `~/.local/share/app.lattice.desktop/` (Linux) /
+  `~/Library/Application Support/app.lattice.desktop/` (macOS) —
+  `lattice.db` (SQLite, WAL) and `files/{docId}/` for uploads.
+- **Settings**: `settings.json` in the app config dir. API keys: OS keychain
+  (Secret Service / macOS Keychain), with a 0600 `secrets.json` fallback when
+  no keychain is available.
+- **Models**: configured in-app (Settings screen) — Vercel AI Gateway, OpenAI,
+  Anthropic, or any OpenAI-compatible endpoint (Ollama, LM Studio, llama.cpp,
+  vLLM) for both chat and embeddings. Changing the embedding model triggers a
+  full re-embed (vector dimensions change).
+
+## Architecture crib sheet
+
+- `src-tauri/src/db.rs` — schema (mirrors web Drizzle schema, single-user),
+  vec0 virtual tables per embedding dimension.
+- `src-tauri/src/commands/` — the IPC surface (`docs`, `graph`, `chat`,
+  `settings`); the desktop analogue of the web app's API routes.
+- `src/lib/ipc.ts` — typed client for those commands. All data access goes
+  through it.
+- `src/lib/ai/` — provider factory (Tauri http fetch = no CORS), local chat
+  transport (streamText in-page, persists messages, attaches citations),
+  graph tools, settings/keychain access.
+- `src/lib/ingest/pipeline.ts` — parse → chunk → deterministic graph → embed →
+  extract → resolve, with debounce/retry/resume; replaces Inngest.
+- Parity-critical copies (keep semantically identical to the web app):
+  `src/lib/parse.ts`, `src/lib/chunk.ts`, `src/lib/ai/prompts.ts`,
+  `src/lib/ai/extraction-schema.ts`, `src/lib/ai/citations.ts`,
+  `src/lib/tokens.ts`.

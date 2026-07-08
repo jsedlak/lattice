@@ -1,19 +1,11 @@
+# Marks src-desktop as its own workspace root so pnpm never walks up into the
+# cortex monorepo — this app is maintained separately.
 packages:
-  - "apps/*"
-  - "packages/*"
+  - "."
 
-# Build-script approvals. canvas/sharp/protobufjs aren't needed for
-# dev/typecheck/test (and canvas would compile from source); decline them.
-# esbuild's postinstall just verifies its prebuilt binary (used by vitest/tsx).
+# Build-script approvals: esbuild's postinstall just verifies its prebuilt
+# binary; canvas (optional dep of pdfjs via unpdf) would compile from source
+# and isn't needed in a webview.
 allowBuilds:
-  canvas: false
   esbuild: true
-  protobufjs: false
-  sharp: false
-
-minimumReleaseAgeExclude:
-  - '@ai-sdk/gateway@4.0.4'
-  - '@ai-sdk/mcp@2.0.3'
-  - '@ai-sdk/provider-utils@5.0.1'
-  - '@ai-sdk/react@4.0.5'
-  - ai@7.0.4
+  canvas: false
