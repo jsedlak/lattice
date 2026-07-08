@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod workspace;
 
 use std::fs;
 use std::path::PathBuf;
@@ -8,12 +9,25 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use tauri::Manager;
 
+use workspace::StorageMode;
+
 pub struct AppState {
     pub db: Mutex<Connection>,
-    /// App data dir: lattice.db + files/{docId}/{filename} uploads.
-    pub data_dir: PathBuf,
+    /// Workspace root: .lattice + lattice.db + files/ uploads + notes/ markdown.
+    pub workspace_dir: PathBuf,
     /// App config dir: settings.json (non-secrets) + secrets fallback.
     pub config_dir: PathBuf,
+    /// Platform app-data dir — the workspace used when no override is set.
+    pub default_workspace_dir: PathBuf,
+    /// Mutable: switching Database <-> Files happens in place, no restart.
+    pub storage_mode: Mutex<StorageMode>,
+}
+
+impl AppState {
+    /// True when markdown files under notes/ are canonical for note content.
+    pub fn files_mode(&self) -> bool {
+        *self.storage_mode.lock() == StorageMode::Files
+    }
 }
 
 pub fn run() {
@@ -22,16 +36,28 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
+            let default_workspace_dir = app.path().app_data_dir()?;
             let config_dir = app.path().app_config_dir()?;
-            fs::create_dir_all(data_dir.join("files"))?;
             fs::create_dir_all(&config_dir)?;
 
-            let conn = db::open(&data_dir.join("lattice.db"))?;
+            let mut workspace_dir = workspace::resolve_workspace(&config_dir, &default_workspace_dir);
+            let cfg = workspace::load_or_init_config(&workspace_dir).or_else(|e| {
+                eprintln!("{e}; falling back to default workspace");
+                workspace_dir = default_workspace_dir.clone();
+                workspace::load_or_init_config(&workspace_dir)
+            })?;
+            fs::create_dir_all(workspace_dir.join("files"))?;
+            if cfg.storage == StorageMode::Files {
+                fs::create_dir_all(workspace_dir.join("notes"))?;
+            }
+
+            let conn = db::open(&workspace_dir.join("lattice.db"))?;
             app.manage(AppState {
                 db: Mutex::new(conn),
-                data_dir,
+                workspace_dir,
                 config_dir,
+                default_workspace_dir,
+                storage_mode: Mutex::new(cfg.storage),
             });
             Ok(())
         })
@@ -77,6 +103,12 @@ pub fn run() {
             commands::chat::append_message,
             commands::chat::upsert_ingest_job,
             commands::chat::list_ingest_jobs,
+            // workspace
+            commands::workspace::get_workspace_info,
+            commands::workspace::set_workspace_path,
+            commands::workspace::restart_app,
+            commands::workspace::sync_workspace,
+            commands::workspace::set_storage_mode,
             // settings & secrets
             commands::settings::get_settings,
             commands::settings::set_settings,

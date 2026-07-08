@@ -26,10 +26,26 @@ pub fn get_settings(state: State<AppState>) -> CmdResult<Option<Value>> {
     serde_json::from_str(&raw).map(Some).map_err(err)
 }
 
+/// Shallow-merges into the existing file rather than overwriting it: the
+/// frontend only ever sends its AppSettings shape, and a plain write would
+/// strip Rust-owned keys like workspacePath.
 #[tauri::command]
 pub fn set_settings(state: State<AppState>, settings: Value) -> CmdResult<()> {
-    let pretty = serde_json::to_string_pretty(&settings).map_err(err)?;
-    fs::write(settings_path(&state), pretty).map_err(err)
+    let path = settings_path(&state);
+    let mut map = fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    if let Value::Object(incoming) = settings {
+        for (k, v) in incoming {
+            map.insert(k, v);
+        }
+    } else {
+        return Err("settings must be an object".into());
+    }
+    let pretty = serde_json::to_string_pretty(&Value::Object(map)).map_err(err)?;
+    fs::write(path, pretty).map_err(err)
 }
 
 // ── Secrets ──────────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ use tauri::State;
 
 use super::{err, CmdResult};
 use crate::db::{existing_vec_tables, new_id, now};
+use crate::workspace;
 use crate::AppState;
 
 #[derive(Serialize, Clone)]
@@ -53,7 +54,7 @@ fn doc_from_row(r: &Row) -> rusqlite::Result<Doc> {
     })
 }
 
-fn get_doc(conn: &Connection, id: &str) -> rusqlite::Result<Option<Doc>> {
+pub(crate) fn get_doc(conn: &Connection, id: &str) -> rusqlite::Result<Option<Doc>> {
     conn.query_row(
         &format!("SELECT {DOC_COLS} FROM document WHERE id = ?1"),
         [id],
@@ -82,7 +83,21 @@ pub fn list_documents(state: State<AppState>, kind: Option<String>) -> CmdResult
 
 #[tauri::command]
 pub fn get_document(state: State<AppState>, id: String) -> CmdResult<Option<Doc>> {
-    get_doc(&state.db.lock(), &id).map_err(err)
+    let mut doc = get_doc(&state.db.lock(), &id).map_err(err)?;
+    // Files mode: the .md file is canonical — serve it, but do NOT refresh the
+    // db cache; a stale cache is how sync_workspace detects external edits.
+    if state.files_mode() {
+        if let Some(d) = doc.as_mut() {
+            if d.kind == "note" {
+                if let Some(rel) = &d.file_path {
+                    if let Ok(text) = fs::read_to_string(state.workspace_dir.join(rel)) {
+                        d.content = text;
+                    }
+                }
+            }
+        }
+    }
+    Ok(doc)
 }
 
 #[tauri::command]
@@ -106,12 +121,21 @@ pub fn create_note(
 ) -> CmdResult<Doc> {
     let conn = state.db.lock();
     let (id, ts) = (new_id(), now());
+    // Files mode: disk first — the file is canonical, the row is the index.
+    let (title, file_path) = if state.files_mode() {
+        let (stem, rel) =
+            workspace::place_note(&conn, &state.workspace_dir, folder_id.as_deref(), &title, None)?;
+        fs::write(state.workspace_dir.join(&rel), &content).map_err(err)?;
+        (stem, Some(rel))
+    } else {
+        (title, None)
+    };
     conn.execute(
-        "INSERT INTO document (id, kind, title, content, folder_id, sort_order, created_at, updated_at)
-         VALUES (?1, 'note', ?2, ?3, ?4,
+        "INSERT INTO document (id, kind, title, content, folder_id, file_path, sort_order, created_at, updated_at)
+         VALUES (?1, 'note', ?2, ?3, ?4, ?5,
                  (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM document WHERE folder_id IS ?4),
-                 ?5, ?5)",
-        params![id, title, content, folder_id, ts],
+                 ?6, ?6)",
+        params![id, title, content, folder_id, file_path, ts],
     )
     .map_err(err)?;
     get_doc(&conn, &id).map_err(err)?.ok_or_else(|| "not found".into())
@@ -143,15 +167,52 @@ pub fn update_document(
         )
         .map_err(err)?;
     }
+
+    let content_changed = content.is_some();
+    let mut new_title = title.unwrap_or_else(|| existing.title.clone());
+    let new_content = content.unwrap_or_else(|| existing.content.clone());
+    let mut new_file_path = existing.file_path.clone();
+
+    // Files mode: the .md file is canonical — apply the change on disk first;
+    // any fs error aborts before the row is touched. Sanitizing/deduping may
+    // adjust the requested title; the returned Doc carries what stuck.
+    if state.files_mode() && existing.kind == "note" {
+        let ws = &state.workspace_dir;
+        match existing.file_path.as_deref() {
+            None => {
+                // Self-heal a row that never got a file.
+                let (stem, rel) =
+                    workspace::place_note(&conn, ws, new_folder.as_deref(), &new_title, None)?;
+                fs::write(ws.join(&rel), &new_content).map_err(err)?;
+                new_title = stem;
+                new_file_path = Some(rel);
+            }
+            Some(cur_rel) => {
+                let cur_abs = ws.join(cur_rel);
+                if new_folder != existing.folder_id || new_title != existing.title {
+                    let (stem, rel) = workspace::place_note(
+                        &conn,
+                        ws,
+                        new_folder.as_deref(),
+                        &new_title,
+                        Some(&cur_abs),
+                    )?;
+                    fs::rename(&cur_abs, ws.join(&rel)).map_err(err)?;
+                    new_title = stem;
+                    new_file_path = Some(rel);
+                }
+                if content_changed {
+                    let rel = new_file_path.as_deref().unwrap_or(cur_rel);
+                    fs::write(ws.join(rel), &new_content).map_err(err)?;
+                }
+            }
+        }
+    }
+
     conn.execute(
-        "UPDATE document SET title = ?2, content = ?3, folder_id = ?4, updated_at = ?5 WHERE id = ?1",
-        params![
-            id,
-            title.unwrap_or(existing.title),
-            content.unwrap_or(existing.content),
-            new_folder,
-            now()
-        ],
+        "UPDATE document SET title = ?2, content = ?3, folder_id = ?4, file_path = ?5, updated_at = ?6
+         WHERE id = ?1",
+        params![id, new_title, new_content, new_folder, new_file_path, now()],
     )
     .map_err(err)?;
     get_doc(&conn, &id).map_err(err)?.ok_or_else(|| "not found".into())
@@ -175,31 +236,51 @@ pub fn set_document_ingest(
     Ok(())
 }
 
-#[tauri::command]
-pub fn delete_document(state: State<AppState>, id: String) -> CmdResult<()> {
-    let conn = state.db.lock();
-    let doc = get_doc(&conn, &id).map_err(err)?.ok_or("document not found")?;
+/// Removes a document row plus its vec-table vectors and upload files.
+/// Shared with workspace sync (externally deleted notes). Does NOT remove
+/// note .md files — the command below owns that.
+pub(crate) fn delete_document_row(
+    conn: &Connection,
+    workspace_dir: &Path,
+    id: &str,
+) -> CmdResult<()> {
+    let doc = get_doc(conn, id).map_err(err)?.ok_or("document not found")?;
 
     // vec0 tables have no FK to chunk — clean them up explicitly first.
-    for table in existing_vec_tables(&conn, "vec_chunks").map_err(err)? {
+    for table in existing_vec_tables(conn, "vec_chunks").map_err(err)? {
         conn.execute(
             &format!(
                 "DELETE FROM {table} WHERE item_id IN (SELECT id FROM chunk WHERE document_id = ?1)"
             ),
-            [&id],
+            [id],
         )
         .map_err(err)?;
     }
     // Cascades: chunk, node (and edges via node FK), ingest_job.
-    conn.execute("DELETE FROM document WHERE id = ?1", [&id]).map_err(err)?;
+    conn.execute("DELETE FROM document WHERE id = ?1", [id]).map_err(err)?;
 
-    if doc.file_path.is_some() {
-        let dir = state.data_dir.join("files").join(&id);
+    if doc.kind == "upload" {
+        let dir = workspace_dir.join("files").join(id);
         if dir.exists() {
             let _ = fs::remove_dir_all(dir);
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn delete_document(state: State<AppState>, id: String) -> CmdResult<()> {
+    let conn = state.db.lock();
+    let doc = get_doc(&conn, &id).map_err(err)?.ok_or("document not found")?;
+    if state.files_mode() && doc.kind == "note" {
+        if let Some(rel) = &doc.file_path {
+            match fs::remove_file(state.workspace_dir.join(rel)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(err(e)),
+                _ => {}
+            }
+        }
+    }
+    delete_document_row(&conn, &state.workspace_dir, &id)
 }
 
 // ── Folders ──────────────────────────────────────────────────────────────────
@@ -245,6 +326,18 @@ pub fn create_folder(
 ) -> CmdResult<Folder> {
     let conn = state.db.lock();
     let (id, ts) = (new_id(), now());
+    // Files mode: the directory is the folder — create it first, letting
+    // sanitize/dedupe settle the name that actually sticks.
+    let name = if state.files_mode() {
+        let parent_rel = workspace::folder_rel_dir(&conn, parent_id.as_deref())?;
+        let abs_parent = state.workspace_dir.join(&parent_rel);
+        fs::create_dir_all(&abs_parent).map_err(err)?;
+        let unique = workspace::unique_name(&abs_parent, &workspace::sanitize_stem(&name), false, None);
+        fs::create_dir(abs_parent.join(&unique)).map_err(err)?;
+        unique
+    } else {
+        name
+    };
     conn.execute(
         "INSERT INTO folder (id, name, parent_id, sort_order, created_at)
          VALUES (?1, ?2, ?3,
@@ -271,6 +364,35 @@ pub fn reorder_documents(
     let conn = state.db.lock();
     let tx = conn.unchecked_transaction().map_err(err)?;
     for (i, id) in ids.iter().enumerate() {
+        // A drag between folders arrives here (not update_document) — in
+        // files mode the note's .md file moves with it.
+        if state.files_mode() {
+            let row: Option<(String, Option<String>, Option<String>)> = tx
+                .query_row(
+                    "SELECT kind, folder_id, file_path FROM document WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(err)?;
+            if let Some((kind, cur_folder, Some(cur_rel))) = row {
+                if kind == "note" && cur_folder.as_deref() != folder_id.as_deref() {
+                    let ws = &state.workspace_dir;
+                    let cur_abs = ws.join(&cur_rel);
+                    let title: String = tx
+                        .query_row("SELECT title FROM document WHERE id = ?1", [id], |r| r.get(0))
+                        .map_err(err)?;
+                    let (stem, rel) =
+                        workspace::place_note(&tx, ws, folder_id.as_deref(), &title, Some(&cur_abs))?;
+                    fs::rename(&cur_abs, ws.join(&rel)).map_err(err)?;
+                    tx.execute(
+                        "UPDATE document SET title = ?2, file_path = ?3 WHERE id = ?1",
+                        params![id, stem, rel],
+                    )
+                    .map_err(err)?;
+                }
+            }
+        }
         tx.execute(
             "UPDATE document SET folder_id = ?2, sort_order = ?3 WHERE id = ?1",
             params![id, folder_id, i as i64],
@@ -290,6 +412,38 @@ pub fn reorder_folders(
     let conn = state.db.lock();
     let tx = conn.unchecked_transaction().map_err(err)?;
     for (i, id) in ids.iter().enumerate() {
+        // Re-parenting a folder moves its directory (and every descendant's
+        // file_path) in files mode.
+        if state.files_mode() {
+            let row: Option<(String, Option<String>)> = tx
+                .query_row("SELECT name, parent_id FROM folder WHERE id = ?1", [id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .optional()
+                .map_err(err)?;
+            if let Some((name, cur_parent)) = row {
+                if cur_parent.as_deref() != parent_id.as_deref() {
+                    let ws = &state.workspace_dir;
+                    let old_rel = workspace::folder_rel_dir(&tx, Some(id))?;
+                    let parent_rel = workspace::folder_rel_dir(&tx, parent_id.as_deref())?;
+                    let abs_parent = ws.join(&parent_rel);
+                    fs::create_dir_all(&abs_parent).map_err(err)?;
+                    let unique =
+                        workspace::unique_name(&abs_parent, &workspace::sanitize_stem(&name), false, None);
+                    let new_rel = parent_rel.join(&unique);
+                    fs::rename(ws.join(&old_rel), ws.join(&new_rel)).map_err(err)?;
+                    workspace::rewrite_path_prefix(
+                        &tx,
+                        &workspace::rel_to_string(&old_rel),
+                        &workspace::rel_to_string(&new_rel),
+                    )?;
+                    if unique != name {
+                        tx.execute("UPDATE folder SET name = ?2 WHERE id = ?1", params![id, unique])
+                            .map_err(err)?;
+                    }
+                }
+            }
+        }
         tx.execute(
             "UPDATE folder SET parent_id = ?2, sort_order = ?3 WHERE id = ?1",
             params![id, parent_id, i as i64],
@@ -301,10 +455,35 @@ pub fn reorder_folders(
 
 #[tauri::command]
 pub fn rename_folder(state: State<AppState>, id: String, name: String) -> CmdResult<()> {
-    state
-        .db
-        .lock()
-        .execute("UPDATE folder SET name = ?2 WHERE id = ?1", params![id, name])
+    let conn = state.db.lock();
+    if state.files_mode() {
+        let ws = &state.workspace_dir;
+        let parent_id: Option<String> = conn
+            .query_row("SELECT parent_id FROM folder WHERE id = ?1", [&id], |r| r.get(0))
+            .map_err(err)?;
+        let old_rel = workspace::folder_rel_dir(&conn, Some(&id))?;
+        let parent_rel = workspace::folder_rel_dir(&conn, parent_id.as_deref())?;
+        let old_abs = ws.join(&old_rel);
+        let unique = workspace::unique_name(
+            &ws.join(&parent_rel),
+            &workspace::sanitize_stem(&name),
+            false,
+            Some(&old_abs),
+        );
+        let new_rel = parent_rel.join(&unique);
+        if new_rel != old_rel {
+            fs::rename(&old_abs, ws.join(&new_rel)).map_err(err)?;
+            workspace::rewrite_path_prefix(
+                &conn,
+                &workspace::rel_to_string(&old_rel),
+                &workspace::rel_to_string(&new_rel),
+            )?;
+        }
+        conn.execute("UPDATE folder SET name = ?2 WHERE id = ?1", params![id, unique])
+            .map_err(err)?;
+        return Ok(());
+    }
+    conn.execute("UPDATE folder SET name = ?2 WHERE id = ?1", params![id, name])
         .map_err(err)?;
     Ok(())
 }
@@ -312,6 +491,64 @@ pub fn rename_folder(state: State<AppState>, id: String, name: String) -> CmdRes
 #[tauri::command]
 pub fn delete_folder(state: State<AppState>, id: String) -> CmdResult<()> {
     let conn = state.db.lock();
+    // Files mode: mirror the fallback-to-root semantics on disk before the
+    // rows change (folder_rel_dir walks the current parent chain).
+    if state.files_mode() {
+        let ws = &state.workspace_dir;
+        let folder_rel = workspace::folder_rel_dir(&conn, Some(&id))?;
+        let notes_root = ws.join("notes");
+        fs::create_dir_all(&notes_root).map_err(err)?;
+
+        let docs: Vec<(String, String, Option<String>)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, title, file_path FROM document WHERE folder_id = ?1 AND kind = 'note'")
+                .map_err(err)?;
+            let rows = stmt
+                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(err)?
+        };
+        for (doc_id, title, rel) in docs {
+            let Some(rel) = rel else { continue };
+            let cur_abs = ws.join(&rel);
+            let (stem, new_rel) = workspace::place_note(&conn, ws, None, &title, Some(&cur_abs))?;
+            fs::rename(&cur_abs, ws.join(&new_rel)).map_err(err)?;
+            conn.execute(
+                "UPDATE document SET title = ?2, file_path = ?3 WHERE id = ?1",
+                params![doc_id, stem, new_rel],
+            )
+            .map_err(err)?;
+        }
+
+        let children: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, name FROM folder WHERE parent_id = ?1")
+                .map_err(err)?;
+            let rows = stmt
+                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .map_err(err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(err)?
+        };
+        for (child_id, name) in children {
+            let old_rel = workspace::folder_rel_dir(&conn, Some(&child_id))?;
+            let unique =
+                workspace::unique_name(&notes_root, &workspace::sanitize_stem(&name), false, None);
+            let new_rel = Path::new("notes").join(&unique);
+            fs::rename(ws.join(&old_rel), ws.join(&new_rel)).map_err(err)?;
+            workspace::rewrite_path_prefix(
+                &conn,
+                &workspace::rel_to_string(&old_rel),
+                &workspace::rel_to_string(&new_rel),
+            )?;
+            if unique != name {
+                conn.execute("UPDATE folder SET name = ?2 WHERE id = ?1", params![child_id, unique])
+                    .map_err(err)?;
+            }
+        }
+
+        // Only removes an empty dir — stray user files keep it (and stay) put.
+        let _ = fs::remove_dir(ws.join(&folder_rel));
+    }
     // Documents fall back to root; child folders are re-rooted (app-managed tree).
     conn.execute("UPDATE document SET folder_id = NULL WHERE folder_id = ?1", [&id])
         .map_err(err)?;
@@ -356,7 +593,7 @@ pub fn import_upload(state: State<AppState>, src_path: String) -> CmdResult<Doc>
     let mime = mime_for(src).ok_or("unsupported file type")?;
 
     let id = new_id();
-    let dest_dir = state.data_dir.join("files").join(&id);
+    let dest_dir = state.workspace_dir.join("files").join(&id);
     fs::create_dir_all(&dest_dir).map_err(err)?;
     let dest = dest_dir.join(&file_name);
     fs::copy(src, &dest).map_err(err)?;
@@ -393,6 +630,6 @@ pub fn read_upload_bytes(
         .flatten()
     };
     let rel = rel.ok_or("document has no stored file")?;
-    let bytes = fs::read(state.data_dir.join(rel)).map_err(err)?;
+    let bytes = fs::read(state.workspace_dir.join(rel)).map_err(err)?;
     Ok(tauri::ipc::Response::new(bytes))
 }

@@ -18,7 +18,7 @@ TAG="v$VERSION"
 export VERSION # read by the python lockfile fallback below
 
 # ── Location ──────────────────────────────────────────────────────────────────
-CONF="src-desktop/src-tauri/tauri.conf.json"
+CONF="src-tauri/tauri.conf.json"
 [ -f "$CONF" ] || die "run this from the repository root"
 
 # ── Preconditions ─────────────────────────────────────────────────────────────
@@ -49,18 +49,18 @@ bump_json() { # file — set .version=$VERSION, preserving 2-space formatting
   " "$1"
 }
 bump_json "$CONF"
-bump_json "src-desktop/package.json"
+bump_json "package.json"
 
 # Cargo.toml + lockfile (first `version =` line is the package's own).
-sed -i.bak "0,/^version = \".*\"/s//version = \"$VERSION\"/" src-desktop/src-tauri/Cargo.toml
-rm -f src-desktop/src-tauri/Cargo.toml.bak
+sed -i.bak "0,/^version = \".*\"/s//version = \"$VERSION\"/" src-tauri/Cargo.toml
+rm -f src-tauri/Cargo.toml.bak
 if command -v cargo >/dev/null 2>&1; then
-  (cd src-desktop/src-tauri && cargo update --workspace --offline --quiet)
+  (cd src-tauri && cargo update --workspace --offline --quiet)
 else
   # No cargo on PATH: patch the lockfile entry directly.
   python3 - <<'EOF'
 import io, re
-path = "src-desktop/src-tauri/Cargo.lock"
+path = "src-tauri/Cargo.lock"
 src = io.open(path, encoding="utf-8").read()
 import os
 version = os.environ["VERSION"]
@@ -74,7 +74,7 @@ EOF
 fi
 
 # ── Commit, tag, push ─────────────────────────────────────────────────────────
-git add "$CONF" src-desktop/package.json src-desktop/src-tauri/Cargo.toml src-desktop/src-tauri/Cargo.lock
+git add "$CONF" package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "Release $TAG"
 git tag -a "$TAG" -m "Release $TAG"
 git push origin main "$TAG"

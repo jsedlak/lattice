@@ -4,14 +4,16 @@ import {
   Bot,
   FileText,
   LayoutDashboard,
+  PanelLeftClose,
+  PanelLeftOpen,
   Settings,
   Waypoints,
 } from "lucide-react";
 
-import { ConfirmProvider, Logo, ThemeToggle } from "@/components/ui";
+import { ConfirmProvider, Logo, LogoMark, ThemeToggle } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { resumePendingIngest } from "@/lib/ingest/pipeline";
-import { listDocuments } from "@/lib/ipc";
+import { enqueueIngest, resumePendingIngest } from "@/lib/ingest/pipeline";
+import { getWorkspaceInfo, listDocuments, syncWorkspace } from "@/lib/ipc";
 import type { Doc } from "@/lib/types";
 
 const NAV = [
@@ -22,14 +24,34 @@ const NAV = [
 ] as const;
 
 const RECENT_COUNT = 5;
+const COLLAPSED_KEY = "lattice.sidebar-collapsed";
 
 export function Shell() {
   const location = useLocation();
   const [recent, setRecent] = useState<Doc[]>([]);
+  const [collapsed, setCollapsed] = useState(
+    () => localStorage.getItem(COLLAPSED_KEY) === "1",
+  );
+
+  const toggleCollapsed = () => {
+    setCollapsed((v) => {
+      localStorage.setItem(COLLAPSED_KEY, v ? "0" : "1");
+      return !v;
+    });
+  };
 
   useEffect(() => {
-    // Pick up ingest work left queued/processing by a previous session.
-    void resumePendingIngest();
+    void (async () => {
+      // Files mode: fold in whatever changed on disk since last launch, then
+      // ingest it. Runs before resume so deleted notes' jobs are already gone.
+      const workspace = await getWorkspaceInfo();
+      if (workspace.mode === "files") {
+        const report = await syncWorkspace();
+        for (const id of [...report.added, ...report.changed]) enqueueIngest(id);
+      }
+      // Pick up ingest work left queued/processing by a previous session.
+      await resumePendingIngest();
+    })();
   }, []);
 
   // Refresh the Recent list on every navigation — edits elsewhere bump
@@ -48,33 +70,62 @@ export function Shell() {
   return (
     <ConfirmProvider>
       <div className="flex h-full">
-        <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-surface">
-          <div className="flex items-center gap-2 px-4 pb-2 pt-4">
-            <Logo />
-          </div>
+        <aside
+          className={cn(
+            "flex shrink-0 flex-col border-r border-border bg-surface transition-[width] duration-200",
+            collapsed ? "w-16" : "w-56",
+          )}
+        >
+          {collapsed ? (
+            <div className="flex flex-col items-center gap-3 pb-2 pt-4">
+              <LogoMark />
+              <button
+                type="button"
+                onClick={toggleCollapsed}
+                title="Expand sidebar"
+                className="rounded-md p-1.5 text-muted transition-colors hover:bg-surface-raised hover:text-foreground"
+              >
+                <PanelLeftOpen className="h-4 w-4" strokeWidth={1.75} />
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between px-4 pb-2 pt-4">
+              <Logo />
+              <button
+                type="button"
+                onClick={toggleCollapsed}
+                title="Collapse sidebar"
+                className="rounded-md p-1.5 text-muted transition-colors hover:bg-surface-raised hover:text-foreground"
+              >
+                <PanelLeftClose className="h-4 w-4" strokeWidth={1.75} />
+              </button>
+            </div>
+          )}
 
-          <nav className="mt-4 flex flex-col gap-0.5 px-2">
+          <nav className={cn("mt-4 flex flex-col gap-0.5", collapsed ? "px-2.5" : "px-2")}>
             {NAV.map(({ to, label, icon: Icon, end }) => (
               <NavLink
                 key={to}
                 to={to}
                 end={end}
+                title={collapsed ? label : undefined}
                 className={({ isActive }) =>
                   cn(
-                    "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 font-medium transition-colors",
+                    "flex items-center rounded-md py-1.5 font-medium transition-colors",
+                    collapsed ? "justify-center px-0" : "gap-2.5 px-2.5",
                     isActive
                       ? "bg-surface-raised text-foreground"
                       : "text-muted hover:bg-surface-raised/60 hover:text-foreground",
                   )
                 }
               >
-                <Icon className="h-4 w-4" strokeWidth={1.75} />
-                {label}
+                <Icon className="h-4 w-4 shrink-0" strokeWidth={1.75} />
+                {!collapsed && label}
               </NavLink>
             ))}
           </nav>
 
-          {recent.length > 0 && (
+          {!collapsed && recent.length > 0 && (
             <div className="mt-6 min-h-0 overflow-y-auto px-2">
               <div className="px-2.5 pb-1 text-[11px] font-medium uppercase tracking-wide text-faint">
                 Recent
@@ -100,23 +151,43 @@ export function Shell() {
           )}
 
           {/* Footer — h-[52px] matches the document sidebar's footer so the top borders align. */}
-          <div className="mt-auto flex h-[52px] shrink-0 items-center justify-between border-t border-border px-3">
-            <NavLink
-              to="/settings"
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-2 rounded-md px-2 py-1.5 font-medium transition-colors",
-                  isActive
-                    ? "bg-surface-raised text-foreground"
-                    : "text-muted hover:text-foreground",
-                )
-              }
-            >
-              <Settings className="h-4 w-4" strokeWidth={1.75} />
-              Settings
-            </NavLink>
-            <ThemeToggle />
-          </div>
+          {collapsed ? (
+            <div className="mt-auto flex shrink-0 flex-col items-center gap-1 border-t border-border py-2">
+              <NavLink
+                to="/settings"
+                title="Settings"
+                className={({ isActive }) =>
+                  cn(
+                    "rounded-md p-1.5 transition-colors",
+                    isActive
+                      ? "bg-surface-raised text-foreground"
+                      : "text-muted hover:text-foreground",
+                  )
+                }
+              >
+                <Settings className="h-4 w-4" strokeWidth={1.75} />
+              </NavLink>
+              <ThemeToggle />
+            </div>
+          ) : (
+            <div className="mt-auto flex h-[52px] shrink-0 items-center justify-between border-t border-border px-3">
+              <NavLink
+                to="/settings"
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-2 rounded-md px-2 py-1.5 font-medium transition-colors",
+                    isActive
+                      ? "bg-surface-raised text-foreground"
+                      : "text-muted hover:text-foreground",
+                  )
+                }
+              >
+                <Settings className="h-4 w-4" strokeWidth={1.75} />
+                Settings
+              </NavLink>
+              <ThemeToggle />
+            </div>
+          )}
         </aside>
 
         <main className="min-w-0 flex-1 overflow-hidden bg-background">

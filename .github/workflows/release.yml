@@ -31,7 +31,7 @@ jobs:
 
       - name: Verify tag matches app version
         run: |
-          APP_VERSION=$(node -p "require('./src-desktop/src-tauri/tauri.conf.json').version")
+          APP_VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           if [ "v$APP_VERSION" != "${{ github.ref_name }}" ]; then
             echo "Tag ${{ github.ref_name }} does not match tauri.conf.json version v$APP_VERSION" >&2
             exit 1
@@ -111,15 +111,15 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      # pnpm version comes from packageManager in the root package.json —
-      # setting one here too makes the action error out.
+      # pnpm version comes from packageManager in package.json — setting one
+      # here too makes the action error out.
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: src-desktop/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -127,7 +127,7 @@ jobs:
 
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-desktop/src-tauri
+          workspaces: src-tauri
           # Tag-scoped caches can never be restored by later tags — only
           # main's caches can (cache-warm.yml maintains those). Don't waste
           # cache storage saving from release runs.
@@ -135,14 +135,12 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
-        working-directory: src-desktop
 
       - name: Build and upload to release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          projectPath: src-desktop
           # Empty on workflow_dispatch: build only, no release upload.
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: ${{ matrix.args }}

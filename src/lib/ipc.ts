@@ -27,7 +27,10 @@ import type {
   RelationType,
   SecretName,
   SimilarEntity,
+  StorageMode,
+  SyncReport,
   TraversalResult,
+  WorkspaceInfo,
 } from "./types";
 
 // ── Documents ────────────────────────────────────────────────────────────────
@@ -203,6 +206,23 @@ export const importUpload = (srcPath: string) => invoke<Doc>("import_upload", { 
 export async function readUploadBytes(documentId: string): Promise<ArrayBuffer> {
   return invoke<ArrayBuffer>("read_upload_bytes", { documentId });
 }
+
+// ── Workspace ────────────────────────────────────────────────────────────────
+
+export const getWorkspaceInfo = () => invoke<WorkspaceInfo>("get_workspace_info");
+
+/** Records the workspace override (null = back to default). Takes effect on restart. */
+export const setWorkspacePath = (path: string | null) =>
+  invoke<void>("set_workspace_path", { path });
+
+export const restartApp = () => invoke<void>("restart_app");
+
+/** Reconciles on-disk markdown with the index (files mode; no-op otherwise). */
+export const syncWorkspace = () => invoke<SyncReport>("sync_workspace");
+
+/** Switches content storage, migrating notes; returns docs needing re-ingest. */
+export const setStorageMode = (mode: StorageMode) =>
+  invoke<SyncReport>("set_storage_mode", { mode });
 
 // ── Settings & secrets ───────────────────────────────────────────────────────
 

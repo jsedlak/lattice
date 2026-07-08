@@ -15,7 +15,10 @@ export interface Doc {
   /** markdown body (notes) or extracted text (uploads). */
   content: string;
   folderId: string | null;
-  /** relative path under the app data dir's files/ — set for kind=upload. */
+  /**
+   * workspace-relative path — files/… for kind=upload, notes/….md for notes
+   * when the workspace stores content as markdown files.
+   */
   filePath: string | null;
   mimeType: string | null;
   byteSize: number | null;
@@ -135,6 +138,28 @@ export interface IngestJobRow {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// ── Workspace ────────────────────────────────────────────────────────────────
+
+/** Where note content is canonical: the SQLite db, or markdown files under notes/. */
+export type StorageMode = "database" | "files";
+
+export interface WorkspaceInfo {
+  /** absolute path of the open workspace directory. */
+  path: string;
+  mode: StorageMode;
+  /** true when this is the platform app-data dir (no override set). */
+  isDefault: boolean;
+  /** workspacePath recorded for the next launch — differs from path while a switch awaits restart. */
+  overridePath: string | null;
+}
+
+/** Result of reconciling on-disk markdown with the index (files mode). */
+export interface SyncReport {
+  added: string[];
+  changed: string[];
+  removed: string[];
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────

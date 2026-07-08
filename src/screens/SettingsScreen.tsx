@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { generateText } from "ai";
-import { CheckCircle2, KeyRound, XCircle } from "lucide-react";
+import { CheckCircle2, FolderOpen, KeyRound, XCircle } from "lucide-react";
 
 import { Button, Input, Spinner, useConfirm } from "@/components/ui";
 import { cn } from "@/lib/cn";
@@ -11,11 +12,13 @@ import type {
   EndpointConfig,
   ProviderKind,
   SecretName,
+  StorageMode,
+  WorkspaceInfo,
 } from "@/lib/types";
 import { DEFAULT_SETTINGS } from "@/lib/types";
 import { languageModelFor } from "@/lib/ai/providers";
 import { invalidateAiSettings, loadSettings, requiresApiKey, saveSettings } from "@/lib/ai/settings";
-import { reingestAll } from "@/lib/ingest/pipeline";
+import { enqueueIngest, reingestAll } from "@/lib/ingest/pipeline";
 
 const PROVIDER_OPTIONS: { value: ProviderKind; label: string; hint: string }[] = [
   { value: "gateway", label: "Vercel AI Gateway", hint: "provider/model slugs — parity with the web app" },
@@ -43,6 +46,17 @@ const EDITOR_OPTIONS: { value: EditorChoice; label: string; hint: string }[] = [
   { value: "codemirror", label: "CodeMirror", hint: "lightweight alternative" },
 ];
 
+const STORAGE_OPTIONS: { value: StorageMode; label: string; hint: string }[] = [
+  { value: "database", label: "Database", hint: "note content lives in the workspace database" },
+  { value: "files", label: "Markdown files", hint: "notes are .md files under notes/ — editable with any tool" },
+];
+
+type Tab = "general" | "ai";
+const TABS: { id: Tab; label: string }[] = [
+  { id: "general", label: "General" },
+  { id: "ai", label: "AI" },
+];
+
 type TestState = { status: "idle" | "running" | "ok" | "fail"; detail?: string };
 
 interface EndpointFormProps {
@@ -68,7 +82,13 @@ function EndpointForm(p: EndpointFormProps) {
           <h2 className="text-sm font-semibold">{p.title}</h2>
           <p className="mt-0.5 text-xs text-muted">{p.description}</p>
         </div>
-        <Button variant="outline" size="sm" onClick={p.onTest} disabled={p.test.status === "running"}>
+        <Button
+          variant="outline"
+          size="sm"
+          className="shrink-0 whitespace-nowrap"
+          onClick={p.onTest}
+          disabled={p.test.status === "running"}
+        >
           {p.test.status === "running" ? <Spinner className="h-3.5 w-3.5" /> : "Test connection"}
         </Button>
       </div>
@@ -142,7 +162,11 @@ function EndpointForm(p: EndpointFormProps) {
 
 export function SettingsScreen() {
   const confirm = useConfirm();
+  const [tab, setTab] = useState<Tab>("general");
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
+  const [restartPending, setRestartPending] = useState(false);
+  const [switchingMode, setSwitchingMode] = useState(false);
   const [chatKey, setChatKey] = useState("");
   const [embeddingKey, setEmbeddingKey] = useState("");
   const [stored, setStored] = useState({ chat: false, embedding: false });
@@ -157,11 +181,13 @@ export function SettingsScreen() {
       const s = await loadSettings();
       setSettings(s);
       setInitialEmbedding(`${s.embedding.kind}:${s.embedding.model}:${s.embedding.dimensions}`);
-      const [ck, ek] = await Promise.all([
+      const [ck, ek, ws] = await Promise.all([
         ipc.getSecret("chat-api-key"),
         ipc.getSecret("embedding-api-key"),
+        ipc.getWorkspaceInfo(),
       ]);
       setStored({ chat: ck !== null, embedding: ek !== null });
+      setWorkspace(ws);
     })();
   }, []);
 
@@ -255,86 +281,227 @@ export function SettingsScreen() {
     }
   };
 
+  const confirmRestart = async (target: string) => {
+    setRestartPending(true);
+    const ok = await confirm({
+      title: "Restart Lattice?",
+      description: `Lattice needs to restart to open the workspace at ${target}.`,
+      confirmLabel: "Restart now",
+    });
+    if (ok) await ipc.restartApp();
+  };
+
+  const pickWorkspace = async () => {
+    if (!workspace) return;
+    const path = await open({ directory: true, title: "Open workspace" });
+    if (typeof path !== "string" || path === workspace.path) return;
+    await ipc.setWorkspacePath(path);
+    setWorkspace({ ...workspace, overridePath: path });
+    await confirmRestart(path);
+  };
+
+  const resetWorkspace = async () => {
+    if (!workspace) return;
+    await ipc.setWorkspacePath(null);
+    setWorkspace({ ...workspace, overridePath: null });
+    if (workspace.isDefault) {
+      // Only a pending switch was cleared — we're already running the default.
+      setRestartPending(false);
+    } else {
+      await confirmRestart("the default location");
+    }
+  };
+
+  const switchMode = async (mode: StorageMode) => {
+    if (!workspace || mode === workspace.mode || switchingMode) return;
+    const ok = await confirm({
+      title: mode === "files" ? "Store notes as markdown files?" : "Store notes in the database?",
+      description:
+        mode === "files"
+          ? "Your notes will be exported as markdown files under notes/ in the workspace, mirroring your folder tree. Titles with unsupported characters or duplicate names get adjusted."
+          : "Note content will be imported back into the workspace database. The notes/ folder stays on disk but is no longer read or updated by Lattice.",
+      confirmLabel: "Switch",
+    });
+    if (!ok) return;
+    setSwitchingMode(true);
+    try {
+      const report = await ipc.setStorageMode(mode);
+      for (const id of [...report.added, ...report.changed]) enqueueIngest(id);
+      setWorkspace({ ...workspace, mode });
+    } finally {
+      setSwitchingMode(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-3xl px-8 py-10">
         <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
         <p className="mt-1 text-sm text-muted">
-          Models and inference. Keys are stored in your OS keychain; nothing
-          leaves this machine except the API calls you configure.
+          Keys are stored in your OS keychain; nothing leaves this machine
+          except the API calls you configure.
         </p>
 
-        <div className="mt-8 grid gap-6">
-          <EndpointForm
-            role="chat"
-            title="Chat model"
-            description="Powers the assistant and graph extraction."
-            config={settings.chat}
-            onChange={(chat) => setSettings({ ...settings, chat })}
-            apiKey={chatKey}
-            keyStored={stored.chat}
-            onApiKeyChange={setChatKey}
-            test={chatTest}
-            onTest={() => void testChat()}
-          />
-
-          <EndpointForm
-            role="embedding"
-            title="Embedding model"
-            description="Powers semantic search and entity resolution. For a fully local setup, point an OpenAI-compatible endpoint at Ollama or LM Studio."
-            config={settings.embedding}
-            onChange={(e) =>
-              setSettings({ ...settings, embedding: { ...settings.embedding, ...e } })
-            }
-            apiKey={embeddingKey}
-            keyStored={stored.embedding}
-            onApiKeyChange={setEmbeddingKey}
-            test={embTest}
-            onTest={() => void testEmbedding()}
-            extra={
-              <label className="grid gap-1">
-                <span className="text-xs font-medium text-muted">Dimensions</span>
-                <Input
-                  type="number"
-                  value={settings.embedding.dimensions}
-                  onChange={(e) =>
-                    setSettings({
-                      ...settings,
-                      embedding: {
-                        ...settings.embedding,
-                        dimensions: Number(e.target.value) || DEFAULT_SETTINGS.embedding.dimensions,
-                      },
-                    })
-                  }
-                />
-              </label>
-            }
-          />
+        <div className="mt-6 flex gap-1 border-b border-border">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={cn(
+                "-mb-px border-b-2 px-3 py-2 text-sm font-medium transition-colors",
+                tab === t.id
+                  ? "border-accent"
+                  : "border-transparent text-muted hover:border-border-strong",
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
         </div>
 
-        <section className="mt-6 rounded-lg border border-border bg-surface p-5">
-          <h2 className="text-sm font-semibold">Markdown editor</h2>
-          <p className="mt-0.5 text-xs text-muted">
-            The engine behind the note editor. Takes effect the next time a note opens.
-          </p>
-          <div className="mt-4 grid grid-cols-2 gap-2">
-            {EDITOR_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => setSettings({ ...settings, editor: opt.value })}
-                className={cn(
-                  "rounded-md border px-3 py-2 text-left transition-colors",
-                  settings.editor === opt.value
-                    ? "border-accent bg-surface-raised"
-                    : "border-border hover:border-border-strong",
+        {tab === "general" && (
+          <div className="mt-6 grid gap-6">
+            <section className="rounded-lg border border-border bg-surface p-5">
+              <h2 className="text-sm font-semibold">Workspace</h2>
+              <p className="mt-0.5 text-xs text-muted">
+                The folder holding your notes, uploads, and the knowledge graph.
+                Avoid cloud-synced folders (Dropbox, OneDrive) — the database
+                doesn't tolerate sync conflicts.
+              </p>
+              <div className="mt-4 flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface-raised px-3 py-2 text-xs">
+                  {workspace?.path ?? "…"}
+                </code>
+                {workspace?.isDefault && (
+                  <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[11px] text-muted">
+                    Default
+                  </span>
                 )}
-              >
-                <div className="text-[13px] font-medium">{opt.label}</div>
-                <div className="mt-0.5 text-[11px] text-muted">{opt.hint}</div>
-              </button>
-            ))}
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => void pickWorkspace()}>
+                  <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+                  Open workspace…
+                </Button>
+                {workspace && (!workspace.isDefault || workspace.overridePath !== null) && (
+                  <Button variant="outline" size="sm" onClick={() => void resetWorkspace()}>
+                    Open default workspace
+                  </Button>
+                )}
+                {restartPending && (
+                  <span className="text-xs text-muted">
+                    Takes effect the next time Lattice starts.
+                  </span>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-surface p-5">
+              <h2 className="text-sm font-semibold">Note storage</h2>
+              <p className="mt-0.5 text-xs text-muted">
+                Where note content is canonical for this workspace. Switching
+                migrates your notes in place.
+              </p>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                {STORAGE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    disabled={switchingMode}
+                    onClick={() => void switchMode(opt.value)}
+                    className={cn(
+                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      workspace?.mode === opt.value
+                        ? "border-accent bg-surface-raised"
+                        : "border-border hover:border-border-strong",
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5 text-[13px] font-medium">
+                      {opt.label}
+                      {switchingMode && workspace?.mode !== opt.value && (
+                        <Spinner className="h-3 w-3" />
+                      )}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-muted">{opt.hint}</div>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-surface p-5">
+              <h2 className="text-sm font-semibold">Markdown editor</h2>
+              <p className="mt-0.5 text-xs text-muted">
+                The engine behind the note editor. Takes effect the next time a note opens.
+              </p>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                {EDITOR_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setSettings({ ...settings, editor: opt.value })}
+                    className={cn(
+                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      settings.editor === opt.value
+                        ? "border-accent bg-surface-raised"
+                        : "border-border hover:border-border-strong",
+                    )}
+                  >
+                    <div className="text-[13px] font-medium">{opt.label}</div>
+                    <div className="mt-0.5 text-[11px] text-muted">{opt.hint}</div>
+                  </button>
+                ))}
+              </div>
+            </section>
           </div>
-        </section>
+        )}
+
+        {tab === "ai" && (
+          <div className="mt-6 grid gap-6">
+            <EndpointForm
+              role="chat"
+              title="Chat model"
+              description="Powers the assistant and graph extraction."
+              config={settings.chat}
+              onChange={(chat) => setSettings({ ...settings, chat })}
+              apiKey={chatKey}
+              keyStored={stored.chat}
+              onApiKeyChange={setChatKey}
+              test={chatTest}
+              onTest={() => void testChat()}
+            />
+
+            <EndpointForm
+              role="embedding"
+              title="Embedding model"
+              description="Powers semantic search and entity resolution. For a fully local setup, point an OpenAI-compatible endpoint at Ollama or LM Studio."
+              config={settings.embedding}
+              onChange={(e) =>
+                setSettings({ ...settings, embedding: { ...settings.embedding, ...e } })
+              }
+              apiKey={embeddingKey}
+              keyStored={stored.embedding}
+              onApiKeyChange={setEmbeddingKey}
+              test={embTest}
+              onTest={() => void testEmbedding()}
+              extra={
+                <label className="grid gap-1">
+                  <span className="text-xs font-medium text-muted">Dimensions</span>
+                  <Input
+                    type="number"
+                    value={settings.embedding.dimensions}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        embedding: {
+                          ...settings.embedding,
+                          dimensions: Number(e.target.value) || DEFAULT_SETTINGS.embedding.dimensions,
+                        },
+                      })
+                    }
+                  />
+                </label>
+              }
+            />
+          </div>
+        )}
 
         <div className="mt-6 flex items-center gap-3">
           <Button onClick={() => void save()} disabled={saving}>

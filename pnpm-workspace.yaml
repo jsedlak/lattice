@@ -1,5 +1,3 @@
-# Marks src-desktop as its own workspace root so pnpm never walks up into the
-# cortex monorepo — this app is maintained separately.
 packages:
   - "."
 

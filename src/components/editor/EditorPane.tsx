@@ -34,21 +34,41 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
     void loadSettings().then((s) => setEditorChoice(s.editor));
   }, []);
   const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Fields the user edited but that haven't been persisted yet. Saves send
+  // ONLY these — sending an untouched title alongside every content save
+  // would silently undo a rename made elsewhere (e.g. the sidebar tree)
+  // while this note is open.
+  const pending = React.useRef<{ title?: string; content?: string }>({});
   // Last title we refreshed the sidebar tree for. The parent renders this
   // component with key={doc.id}, so it remounts (with fresh state) when the
   // selected document changes — no reset effect needed, and onRefresh()
   // won't clobber in-progress edits.
   const lastRefreshedTitle = React.useRef(doc.title);
 
+  // Adopt renames made outside this pane unless a title edit is in flight.
+  React.useEffect(() => {
+    if (pending.current.title === undefined) {
+      setTitle(doc.title);
+      lastRefreshedTitle.current = doc.title;
+    }
+  }, [doc.title]);
+
   const persist = React.useCallback(
     async (patch: { title?: string; content?: string }) => {
+      if (patch.title === undefined && patch.content === undefined) return;
       setSave("saving");
       try {
-        await updateDocument(doc.id, patch);
+        const saved = await updateDocument(doc.id, patch);
         setSave("saved");
+        // Files-mode workspaces may adjust the title to a usable, unique
+        // filename — adopt what actually stuck.
+        if (patch.title !== undefined && saved.title !== patch.title) {
+          patch = { ...patch, title: saved.title };
+          setTitle(saved.title);
+        }
         // Deterministic graph rebuild + LLM ingest on every content save.
         if (patch.content !== undefined) {
-          await buildDeterministic(doc.id, patch.title ?? doc.title, patch.content);
+          await buildDeterministic(doc.id, patch.title ?? saved.title, patch.content);
           enqueueIngest(doc.id);
         }
         // When the title changed, reload the document list (sidebar + tabs)
@@ -61,13 +81,20 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         setSave("idle");
       }
     },
-    [doc.id, doc.title, onRefresh],
+    [doc.id, onRefresh],
   );
 
   const scheduleSave = React.useCallback(
     (patch: { title?: string; content?: string }) => {
+      // Merge, don't replace: a title edit must survive a content keystroke
+      // landing before the debounce fires.
+      pending.current = { ...pending.current, ...patch };
       if (timer.current) clearTimeout(timer.current);
-      timer.current = setTimeout(() => persist(patch), AUTOSAVE_MS);
+      timer.current = setTimeout(() => {
+        const flush = pending.current;
+        pending.current = {};
+        void persist(flush);
+      }, AUTOSAVE_MS);
     },
     [persist],
   );
@@ -81,7 +108,11 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
         if (timer.current) clearTimeout(timer.current);
-        void persist({ title, content });
+        // Flush what's dirty; content is included so an explicit save always
+        // lands the visible text.
+        const flush = { ...pending.current, content };
+        pending.current = {};
+        void persist(flush);
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "p") {
         e.preventDefault();
@@ -102,7 +133,7 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
           value={title}
           onChange={(e) => {
             setTitle(e.target.value);
-            scheduleSave({ title: e.target.value, content });
+            scheduleSave({ title: e.target.value });
           }}
           className="min-w-0 flex-1 truncate bg-transparent  font-medium focus:outline-none"
           aria-label="Document title"
@@ -156,7 +187,7 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
                 }}
                 onChange={(val) => {
                   setContent(val);
-                  scheduleSave({ title, content: val });
+                  scheduleSave({ content: val });
                 }}
               />
             ) : editorChoice === "monaco" ? (
@@ -166,7 +197,7 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
                 className="absolute inset-0 pl-1 pt-1"
                 onChange={(val) => {
                   setContent(val);
-                  scheduleSave({ title, content: val });
+                  scheduleSave({ content: val });
                 }}
               />
             ) : null}
