@@ -8,7 +8,7 @@ import {
   DEFAULT_SETTINGS,
   type AppSettings,
   type EndpointConfig,
-  type ProviderKind,
+  type EndpointKind,
   type SecretName,
 } from "@/lib/types";
 import * as ipc from "@/lib/ipc";
@@ -58,12 +58,14 @@ export async function saveSettings(
   invalidateAiSettings();
 }
 
-/** openai-compatible endpoints (Ollama, LM Studio, llama.cpp) may be keyless. */
-export function requiresApiKey(kind: ProviderKind): boolean {
-  return kind !== "openai-compatible";
+/** openai-compatible endpoints (Ollama, LM Studio, llama.cpp) and the
+ *  built-in local model are keyless. */
+export function requiresApiKey(kind: EndpointKind): boolean {
+  return kind !== "openai-compatible" && kind !== "local";
 }
 
 function endpointReady(config: EndpointConfig, apiKey: string | null): boolean {
+  if (config.kind === "local") return true; // built-in — nothing to configure
   if (!config.model.trim()) return false;
   if (config.kind === "openai-compatible" && !config.baseUrl?.trim()) return false;
   if (requiresApiKey(config.kind) && !apiKey) return false;

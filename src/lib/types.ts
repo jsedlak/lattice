@@ -166,12 +166,29 @@ export interface SyncReport {
 
 export type ProviderKind = "gateway" | "openai" | "anthropic" | "openai-compatible";
 
+/** Endpoint kinds: cloud/self-hosted providers, plus the built-in on-device
+ *  model ("local" — embeddings only, runs in the Rust core). */
+export type EndpointKind = ProviderKind | "local";
+
 export interface EndpointConfig {
-  kind: ProviderKind;
+  kind: EndpointKind;
   /** provider model id — e.g. "anthropic/claude-opus-4-8" (gateway) or "llama3.1" (local). */
   model: string;
   /** required for kind="openai-compatible" (e.g. http://localhost:11434/v1). */
   baseUrl?: string;
+}
+
+/** The built-in on-device embedding model (downloaded on first use, ~24 MB). */
+export const LOCAL_EMBEDDING = {
+  kind: "local",
+  model: "all-MiniLM-L6-v2",
+  dimensions: 384,
+} as const;
+
+export interface LocalEmbeddingInfo {
+  ready: boolean;
+  model: string;
+  dimensions: number;
 }
 
 /** Markdown editor engine for the note editor. */

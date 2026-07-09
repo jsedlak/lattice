@@ -20,6 +20,7 @@ import type {
   IngestJobRow,
   IngestStatus,
   JobStatus,
+  LocalEmbeddingInfo,
   JobStep,
   MessageRow,
   Neighborhood,
@@ -223,6 +224,19 @@ export const syncWorkspace = () => invoke<SyncReport>("sync_workspace");
 /** Switches content storage, migrating notes; returns docs needing re-ingest. */
 export const setStorageMode = (mode: StorageMode) =>
   invoke<SyncReport>("set_storage_mode", { mode });
+
+// ── Local embedding ──────────────────────────────────────────────────────────
+
+export const localEmbeddingStatus = () =>
+  invoke<LocalEmbeddingInfo>("local_embedding_status");
+
+/** Downloads model files (emits `local-embedding-progress`) and smoke-tests them. */
+export const downloadLocalEmbeddingModel = () =>
+  invoke<void>("download_local_embedding_model");
+
+/** On-device embedding — one vector (384 dims) per input text. */
+export const localEmbedTexts = (texts: string[]) =>
+  invoke<number[][]>("local_embed_texts", { texts });
 
 // ── Settings & secrets ───────────────────────────────────────────────────────
 

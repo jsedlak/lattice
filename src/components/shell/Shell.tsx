@@ -14,10 +14,11 @@ import {
   ZoomOut,
 } from "lucide-react";
 
+import { Onboarding } from "@/components/onboarding/Onboarding";
 import { ConfirmProvider, Logo, LogoMark, ResizeHandle } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { enqueueIngest, resumePendingIngest } from "@/lib/ingest/pipeline";
-import { getWorkspaceInfo, listDocuments, syncWorkspace } from "@/lib/ipc";
+import { getSettings, getWorkspaceInfo, listDocuments, syncWorkspace } from "@/lib/ipc";
 import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
 import type { Doc } from "@/lib/types";
 
@@ -101,8 +102,16 @@ export function Shell() {
     saveLayoutPrefs({ sidebarCollapsed: next });
   };
 
+  const [needsOnboarding, setNeedsOnboarding] = useState(false);
+
   useEffect(() => {
     void (async () => {
+      // Fresh install (no settings at all, or never configured/onboarded):
+      // walk through first-run setup before anything else.
+      const raw = (await getSettings()) as Record<string, unknown> | null;
+      if (!raw || (raw.onboarded !== true && raw.chat === undefined)) {
+        setNeedsOnboarding(true);
+      }
       // Files mode: fold in whatever changed on disk since last launch, then
       // ingest it. Runs before resume so deleted notes' jobs are already gone.
       const workspace = await getWorkspaceInfo();
@@ -270,6 +279,8 @@ export function Shell() {
         <main className="min-w-0 flex-1 overflow-hidden bg-background">
           <Outlet />
         </main>
+
+        {needsOnboarding && <Onboarding onDone={() => setNeedsOnboarding(false)} />}
 
         {zoom !== 1 && (
           <button

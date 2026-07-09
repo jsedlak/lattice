@@ -1,5 +1,6 @@
 mod commands;
 mod db;
+mod embedding;
 mod workspace;
 
 use std::fs;
@@ -21,6 +22,10 @@ pub struct AppState {
     pub default_workspace_dir: PathBuf,
     /// Mutable: switching Database <-> Files happens in place, no restart.
     pub storage_mode: Mutex<StorageMode>,
+    /// Machine-global (not per-workspace) dir for downloaded ML models.
+    pub models_dir: PathBuf,
+    /// Lazily-loaded local embedding session.
+    pub embedder: Mutex<Option<fastembed::TextEmbedding>>,
 }
 
 impl AppState {
@@ -51,6 +56,7 @@ pub fn run() {
                 fs::create_dir_all(workspace_dir.join("notes"))?;
             }
 
+            let models_dir = app.path().app_local_data_dir()?.join("models");
             let conn = db::open(&workspace_dir.join("lattice.db"))?;
             app.manage(AppState {
                 db: Mutex::new(conn),
@@ -58,6 +64,8 @@ pub fn run() {
                 config_dir,
                 default_workspace_dir,
                 storage_mode: Mutex::new(cfg.storage),
+                models_dir,
+                embedder: Mutex::new(None),
             });
             Ok(())
         })
@@ -109,6 +117,10 @@ pub fn run() {
             commands::workspace::restart_app,
             commands::workspace::sync_workspace,
             commands::workspace::set_storage_mode,
+            // local embedding
+            commands::embedding::local_embedding_status,
+            commands::embedding::download_local_embedding_model,
+            commands::embedding::local_embed_texts,
             // settings & secrets
             commands::settings::get_settings,
             commands::settings::set_settings,

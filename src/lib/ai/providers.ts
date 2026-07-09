@@ -22,6 +22,10 @@ const BASE_URLS: Record<string, string> = {
 };
 
 function compatProvider(config: EndpointConfig, apiKey: string | null) {
+  if (config.kind === "local") {
+    // Callers branch to the Rust core before reaching the provider factory.
+    throw new Error("the built-in local model has no HTTP endpoint");
+  }
   const baseURL = config.kind === "openai-compatible" ? config.baseUrl! : BASE_URLS[config.kind]!;
   return createOpenAICompatible({
     name: config.kind,
