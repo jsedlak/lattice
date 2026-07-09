@@ -49,4 +49,3 @@ export { Spinner } from "./spinner";
 export { Separator } from "./separator";
 export { Logo, LogoMark } from "./logo";
 export { ThemeProvider } from "./theme-provider";
-export { ThemeToggle } from "./theme-toggle";

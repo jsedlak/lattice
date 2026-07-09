@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata: what GNOME Software / Ubuntu App Center shows for the
+     installed app (name, publisher, description, screenshots). Shipped in the
+     .deb at /usr/share/metainfo/. The release entry below is bumped by
+     scripts/release.sh. -->
+<component type="desktop-application">
+  <id>app.lattice.desktop</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <name>Lattice</name>
+  <summary>Local-first knowledge graph second brain</summary>
+  <developer id="com.github.jsedlak">
+    <name>John Sedlak</name>
+  </developer>
+  <description>
+    <p>
+      Write markdown, upload documents, and Lattice weaves everything into a
+      queryable knowledge graph an AI assistant answers from - with citations
+      back to your own notes.
+    </p>
+    <p>
+      Notes live in a single database or as plain markdown files on disk that
+      you can edit with any tool, sync, and version - Lattice picks up external
+      edits on launch. Wikilinks and tags build a deterministic graph as you
+      type; an LLM pass extracts entities and relationships on top of it.
+    </p>
+    <p>
+      Bring your own models: OpenAI, Anthropic, Vercel AI Gateway, or any
+      OpenAI-compatible local endpoint such as Ollama or LM Studio - for chat
+      and embeddings independently. Everything stays on your machine except
+      the AI API calls you configure.
+    </p>
+  </description>
+  <launchable type="desktop-id">Lattice.desktop</launchable>
+  <url type="homepage">https://github.com/jsedlak/lattice</url>
+  <url type="bugtracker">https://github.com/jsedlak/lattice/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/jsedlak/lattice/main/public/screenshots/editor.png</image>
+      <caption>The editor: markdown with live preview, wikilinks, and tags</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/jsedlak/lattice/main/public/screenshots/graph.png</image>
+      <caption>The knowledge graph your notes build</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/jsedlak/lattice/main/public/screenshots/chat.png</image>
+      <caption>The assistant answers from your graph and cites its sources</caption>
+    </screenshot>
+  </screenshots>
+  <categories>
+    <category>Office</category>
+    <category>Utility</category>
+  </categories>
+  <content_rating type="oars-1.1" />
+  <releases>
+    <release version="0.3.0" date="2026-07-08" />
+  </releases>
+</component>

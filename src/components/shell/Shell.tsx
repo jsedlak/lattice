@@ -10,7 +10,7 @@ import {
   Waypoints,
 } from "lucide-react";
 
-import { ConfirmProvider, Logo, LogoMark, ThemeToggle } from "@/components/ui";
+import { ConfirmProvider, Logo, LogoMark } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { enqueueIngest, resumePendingIngest } from "@/lib/ingest/pipeline";
 import { getWorkspaceInfo, listDocuments, syncWorkspace } from "@/lib/ipc";
@@ -152,7 +152,7 @@ export function Shell() {
 
           {/* Footer — h-[52px] matches the document sidebar's footer so the top borders align. */}
           {collapsed ? (
-            <div className="mt-auto flex shrink-0 flex-col items-center gap-1 border-t border-border py-2">
+            <div className="mt-auto flex h-[52px] shrink-0 items-center justify-center border-t border-border">
               <NavLink
                 to="/settings"
                 title="Settings"
@@ -167,10 +167,9 @@ export function Shell() {
               >
                 <Settings className="h-4 w-4" strokeWidth={1.75} />
               </NavLink>
-              <ThemeToggle />
             </div>
           ) : (
-            <div className="mt-auto flex h-[52px] shrink-0 items-center justify-between border-t border-border px-3">
+            <div className="mt-auto flex h-[52px] shrink-0 items-center border-t border-border px-3">
               <NavLink
                 to="/settings"
                 className={({ isActive }) =>
@@ -185,7 +184,6 @@ export function Shell() {
                 <Settings className="h-4 w-4" strokeWidth={1.75} />
                 Settings
               </NavLink>
-              <ThemeToggle />
             </div>
           )}
         </aside>

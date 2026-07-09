@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { generateText } from "ai";
-import { CheckCircle2, FolderOpen, KeyRound, XCircle } from "lucide-react";
+import { CheckCircle2, FolderOpen, KeyRound, Monitor, Moon, Sun, XCircle } from "lucide-react";
+import { useTheme } from "next-themes";
 
 import { Button, Input, Spinner, useConfirm } from "@/components/ui";
 import { cn } from "@/lib/cn";
@@ -45,6 +46,12 @@ const EDITOR_OPTIONS: { value: EditorChoice; label: string; hint: string }[] = [
   { value: "monaco", label: "Monaco", hint: "VS Code's editor — default" },
   { value: "codemirror", label: "CodeMirror", hint: "lightweight alternative" },
 ];
+
+const THEME_OPTIONS = [
+  { value: "light", label: "Light", hint: "bright surfaces", icon: Sun },
+  { value: "dark", label: "Dark", hint: "default", icon: Moon },
+  { value: "system", label: "System", hint: "follow the OS setting", icon: Monitor },
+] as const;
 
 const STORAGE_OPTIONS: { value: StorageMode; label: string; hint: string }[] = [
   { value: "database", label: "Database", hint: "note content lives in the workspace database" },
@@ -162,6 +169,7 @@ function EndpointForm(p: EndpointFormProps) {
 
 export function SettingsScreen() {
   const confirm = useConfirm();
+  const { theme, setTheme } = useTheme();
   const [tab, setTab] = useState<Tab>("general");
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
@@ -420,6 +428,31 @@ export function SettingsScreen() {
                       {switchingMode && workspace?.mode !== opt.value && (
                         <Spinner className="h-3 w-3" />
                       )}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-muted">{opt.hint}</div>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-surface p-5">
+              <h2 className="text-sm font-semibold">Appearance</h2>
+              <p className="mt-0.5 text-xs text-muted">Color theme for the app.</p>
+              <div className="mt-4 grid grid-cols-3 gap-2">
+                {THEME_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setTheme(opt.value)}
+                    className={cn(
+                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      theme === opt.value
+                        ? "border-accent bg-surface-raised"
+                        : "border-border hover:border-border-strong",
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5 text-[13px] font-medium">
+                      <opt.icon className="h-3.5 w-3.5 text-muted" />
+                      {opt.label}
                     </div>
                     <div className="mt-0.5 text-[11px] text-muted">{opt.hint}</div>
                   </button>

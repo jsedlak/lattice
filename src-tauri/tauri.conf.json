@@ -28,6 +28,19 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
+    "publisher": "John Sedlak",
+    "homepage": "https://github.com/jsedlak/lattice",
+    "shortDescription": "Local-first knowledge graph second brain",
+    "longDescription": "Write markdown, upload documents, and Lattice weaves everything into a queryable knowledge graph an AI assistant answers from - with citations back to your own notes. Notes live in a single database or as plain markdown files on disk that you can edit with any tool. Bring your own models: OpenAI, Anthropic, Vercel AI Gateway, or any OpenAI-compatible local endpoint such as Ollama.",
+    "copyright": "Copyright 2026 John Sedlak",
+    "linux": {
+      "deb": {
+        "section": "editors",
+        "files": {
+          "/usr/share/metainfo/app.lattice.desktop.metainfo.xml": "./assets/app.lattice.desktop.metainfo.xml"
+        }
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

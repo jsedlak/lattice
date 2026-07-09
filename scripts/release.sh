@@ -73,8 +73,13 @@ io.open(path, "w", encoding="utf-8").write(src)
 EOF
 fi
 
+# AppStream metainfo (shipped in the .deb; App Center reads the release entry).
+METAINFO="src-tauri/assets/app.lattice.desktop.metainfo.xml"
+sed -i.bak "s|<release version=\"[^\"]*\" date=\"[^\"]*\" />|<release version=\"$VERSION\" date=\"$(date +%F)\" />|" "$METAINFO"
+rm -f "$METAINFO.bak"
+
 # ── Commit, tag, push ─────────────────────────────────────────────────────────
-git add "$CONF" package.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git add "$CONF" package.json src-tauri/Cargo.toml src-tauri/Cargo.lock "$METAINFO"
 git commit -m "Release $TAG"
 git tag -a "$TAG" -m "Release $TAG"
 git push origin main "$TAG"
