@@ -6,8 +6,10 @@ import { Link } from "react-router-dom";
 
 import { MarkdownPreview } from "@/components/editor/MarkdownPreview";
 import { MonacoMarkdown } from "@/components/editor/MonacoMarkdown";
+import { ResizeHandle } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { loadSettings } from "@/lib/ai/settings";
+import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
 import { latticeEditorExtensions } from "@/lib/codemirror-lattice";
 import { buildDeterministic } from "@/lib/graph-build";
 import { enqueueIngest } from "@/lib/ingest/pipeline";
@@ -29,9 +31,16 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
   const [save, setSave] = React.useState<SaveState>("idle");
   const [showPreview, setShowPreview] = React.useState(true);
   const [editorChoice, setEditorChoice] = React.useState<EditorChoice | null>(null);
+  const [split, setSplit] = React.useState(() => layoutBootCache().editorSplit);
+  const splitRef = React.useRef(split);
+  const splitRowRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
     void loadSettings().then((s) => setEditorChoice(s.editor));
+    void loadLayoutPrefs().then((p) => {
+      setSplit(p.editorSplit);
+      splitRef.current = p.editorSplit;
+    });
   }, []);
   const timer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   // Fields the user edited but that haven't been persisted yet. Saves send
@@ -161,15 +170,16 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
       </div>
 
       {/* Split */}
-      <div className="flex min-h-0 flex-1">
+      <div ref={splitRowRef} className="flex min-h-0 flex-1">
         {/* Full-bleed editing surface: the surface bg marks the editable area
             even when the note is empty. Absolute inset gives the editor a
             definite pixel height — flex percentage chains collapse in
             WebKitGTK. */}
         <div
+          style={showPreview ? { width: `${split * 100}%` } : undefined}
           className={cn(
             "relative min-h-0 bg-surface",
-            showPreview ? "w-1/2 border-r border-border" : "w-full",
+            showPreview ? "border-r border-border" : "w-full",
           )}
         >
             {editorChoice === "codemirror" ? (
@@ -203,12 +213,25 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
             ) : null}
         </div>
         {showPreview && (
-          <div className="min-h-0 w-1/2 overflow-auto px-6 py-3">
-            <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-faint">
-              Preview
+          <>
+            <ResizeHandle
+              label="Resize editor/preview split"
+              onResize={(x) => {
+                const rect = splitRowRef.current?.getBoundingClientRect();
+                if (!rect || rect.width === 0) return;
+                const f = Math.min(0.8, Math.max(0.2, (x - rect.left) / rect.width));
+                splitRef.current = f;
+                setSplit(f);
+              }}
+              onEnd={() => saveLayoutPrefs({ editorSplit: splitRef.current })}
+            />
+            <div className="min-h-0 min-w-0 flex-1 overflow-auto px-6 py-3">
+              <div className="mb-2 text-[10px] font-medium uppercase tracking-wide text-faint">
+                Preview
+              </div>
+              <MarkdownPreview content={content} />
             </div>
-            <MarkdownPreview content={content} />
-          </div>
+          </>
         )}
       </div>
     </div>

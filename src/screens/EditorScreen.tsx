@@ -6,8 +6,9 @@ import { CreateNotePrompt } from "@/components/editor/CreateNotePrompt";
 import { DocumentTabs, type EditorTab } from "@/components/editor/DocumentTabs";
 import { EditorPane } from "@/components/editor/EditorPane";
 import { UploadDetail } from "@/components/editor/UploadDetail";
-import { Spinner } from "@/components/ui";
+import { ResizeHandle, Spinner } from "@/components/ui";
 import { findDocumentByTitle, getDocument, listDocuments, listFolders } from "@/lib/ipc";
+import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
 import type { Doc, Folder } from "@/lib/types";
 
 /**
@@ -25,6 +26,16 @@ export function EditorScreen() {
   const [folders, setFolders] = React.useState<Folder[]>([]);
   const [selected, setSelected] = React.useState<Doc | null>(null);
   const [createTitle, setCreateTitle] = React.useState<string | null>(null);
+  const [treeWidth, setTreeWidth] = React.useState(() => layoutBootCache().treeWidth);
+  const treeWidthRef = React.useRef(treeWidth);
+  const rowRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    void loadLayoutPrefs().then((p) => {
+      setTreeWidth(p.treeWidth);
+      treeWidthRef.current = p.treeWidth;
+    });
+  }, []);
 
   // The desktop analogue of the web app's router.refresh(): reload the data
   // that the server components used to fetch.
@@ -89,13 +100,24 @@ export function EditorScreen() {
     tabParam === "uploads" || selected?.kind === "upload" ? "uploads" : "documents";
 
   return (
-    <div className="flex h-full">
+    <div ref={rowRef} className="flex h-full">
       <DocumentTabs
         documents={documents}
         folders={folders}
         selectedId={selected?.id ?? null}
         tab={tab}
         onRefresh={onRefresh}
+        width={treeWidth}
+      />
+      <ResizeHandle
+        label="Resize document list"
+        onResize={(x) => {
+          const left = rowRef.current?.getBoundingClientRect().left ?? 0;
+          const w = Math.min(480, Math.max(200, x - left));
+          treeWidthRef.current = w;
+          setTreeWidth(w);
+        }}
+        onEnd={() => saveLayoutPrefs({ treeWidth: treeWidthRef.current })}
       />
       <div className="h-full min-w-0 flex-1">
         {selected ? (

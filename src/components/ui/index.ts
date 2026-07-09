@@ -48,4 +48,5 @@ export { ConfirmProvider, useConfirm, type ConfirmOptions } from "./confirm-dial
 export { Spinner } from "./spinner";
 export { Separator } from "./separator";
 export { Logo, LogoMark } from "./logo";
+export { ResizeHandle } from "./resize-handle";
 export { ThemeProvider } from "./theme-provider";

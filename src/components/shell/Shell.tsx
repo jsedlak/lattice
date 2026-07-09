@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import {
   Bot,
@@ -10,10 +10,11 @@ import {
   Waypoints,
 } from "lucide-react";
 
-import { ConfirmProvider, Logo, LogoMark } from "@/components/ui";
+import { ConfirmProvider, Logo, LogoMark, ResizeHandle } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { enqueueIngest, resumePendingIngest } from "@/lib/ingest/pipeline";
 import { getWorkspaceInfo, listDocuments, syncWorkspace } from "@/lib/ipc";
+import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
 import type { Doc } from "@/lib/types";
 
 const NAV = [
@@ -24,20 +25,29 @@ const NAV = [
 ] as const;
 
 const RECENT_COUNT = 5;
-const COLLAPSED_KEY = "lattice.sidebar-collapsed";
+const COLLAPSED_WIDTH = 64;
 
 export function Shell() {
   const location = useLocation();
   const [recent, setRecent] = useState<Doc[]>([]);
-  const [collapsed, setCollapsed] = useState(
-    () => localStorage.getItem(COLLAPSED_KEY) === "1",
-  );
+  const [collapsed, setCollapsed] = useState(() => layoutBootCache().sidebarCollapsed);
+  const [width, setWidth] = useState(() => layoutBootCache().sidebarWidth);
+  const [resizing, setResizing] = useState(false);
+  const widthRef = useRef(width);
+
+  // Reconcile with settings.json — the boot cache can be stale or missing.
+  useEffect(() => {
+    void loadLayoutPrefs().then((p) => {
+      setCollapsed(p.sidebarCollapsed);
+      setWidth(p.sidebarWidth);
+      widthRef.current = p.sidebarWidth;
+    });
+  }, []);
 
   const toggleCollapsed = () => {
-    setCollapsed((v) => {
-      localStorage.setItem(COLLAPSED_KEY, v ? "0" : "1");
-      return !v;
-    });
+    const next = !collapsed;
+    setCollapsed(next);
+    saveLayoutPrefs({ sidebarCollapsed: next });
   };
 
   useEffect(() => {
@@ -71,9 +81,10 @@ export function Shell() {
     <ConfirmProvider>
       <div className="flex h-full">
         <aside
+          style={{ width: collapsed ? COLLAPSED_WIDTH : width }}
           className={cn(
-            "flex shrink-0 flex-col border-r border-border bg-surface transition-[width] duration-200",
-            collapsed ? "w-16" : "w-56",
+            "flex shrink-0 flex-col border-r border-border bg-surface",
+            !resizing && "transition-[width] duration-200",
           )}
         >
           {collapsed ? (
@@ -187,6 +198,23 @@ export function Shell() {
             </div>
           )}
         </aside>
+
+        {!collapsed && (
+          <ResizeHandle
+            label="Resize sidebar"
+            onStart={() => setResizing(true)}
+            onResize={(x) => {
+              // The sidebar starts at the window's left edge.
+              const w = Math.min(400, Math.max(180, x));
+              widthRef.current = w;
+              setWidth(w);
+            }}
+            onEnd={() => {
+              setResizing(false);
+              saveLayoutPrefs({ sidebarWidth: widthRef.current });
+            }}
+          />
+        )}
 
         <main className="min-w-0 flex-1 overflow-hidden bg-background">
           <Outlet />

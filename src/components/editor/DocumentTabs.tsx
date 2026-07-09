@@ -26,12 +26,14 @@ export function DocumentTabs({
   selectedId,
   tab,
   onRefresh,
+  width,
 }: {
   documents: Doc[];
   folders: Folder[];
   selectedId: string | null;
   tab: EditorTab;
   onRefresh: () => void;
+  width?: number;
 }) {
   const navigate = useNavigate();
   const [creating, setCreating] = React.useState(false);
@@ -61,7 +63,10 @@ export function DocumentTabs({
   }
 
   return (
-    <div className="flex h-full w-72 shrink-0 flex-col border-r border-border bg-surface">
+    <div
+      style={{ width: width ?? 288 }}
+      className="flex h-full shrink-0 flex-col border-r border-border bg-surface"
+    >
       {/* Tabs — h-12 matches the document header so the bottom borders align. */}
       <div className="flex h-12 shrink-0 border-b border-border">
         <TabLink active={tab === "documents"} to="/editor?tab=documents" label="Documents" />
