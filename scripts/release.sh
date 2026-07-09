@@ -82,7 +82,33 @@ rm -f "$METAINFO.bak"
 git add "$CONF" package.json src-tauri/Cargo.toml src-tauri/Cargo.lock "$METAINFO"
 git commit -m "Release $TAG"
 git tag -a "$TAG" -m "Release $TAG"
-git push origin main "$TAG"
+git push origin main
+
+# The release commit touches Cargo.toml/Cargo.lock, which triggers cache-warm
+# on main. Hold the tag until that run finishes: tag builds can only restore
+# caches saved on main, so tagging early means compiling dependencies cold
+# (see the 20-minute v0.5.1 builds). A cache-warm failure only warns — the
+# release still goes out, just slower.
+if command -v gh >/dev/null 2>&1; then
+  echo "Waiting for cache-warm on $(git rev-parse --short HEAD) before pushing the tag…"
+  RUN_ID=""
+  for _ in $(seq 1 12); do # the run can take a few seconds to appear
+    RUN_ID=$(gh run list --workflow=cache-warm.yml --commit "$(git rev-parse HEAD)" \
+      --json databaseId --jq '.[0].databaseId' 2>/dev/null || true)
+    [ -n "$RUN_ID" ] && break
+    sleep 5
+  done
+  if [ -n "$RUN_ID" ]; then
+    gh run watch "$RUN_ID" --exit-status \
+      || echo "warning: cache-warm failed — release builds will run with a colder cache" >&2
+  else
+    echo "warning: no cache-warm run appeared; continuing without the warm cache" >&2
+  fi
+else
+  echo "note: gh not installed — skipping the cache-warm wait" >&2
+fi
+
+git push origin "$TAG"
 
 echo
 echo "Pushed $TAG — CI is building the installers."
