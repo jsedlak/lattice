@@ -16,6 +16,8 @@ export interface LayoutPrefs {
   treeWidth: number;
   /** Editor's share of the editor/preview split, 0..1. */
   editorSplit: number;
+  /** Webview zoom factor (Ctrl+/- global font size), 1 = default. */
+  zoom: number;
 }
 
 export const LAYOUT_DEFAULTS: LayoutPrefs = {
@@ -23,6 +25,7 @@ export const LAYOUT_DEFAULTS: LayoutPrefs = {
   sidebarWidth: 224,
   treeWidth: 288,
   editorSplit: 0.5,
+  zoom: 1,
 };
 
 const CACHE_KEY = "lattice.layout";

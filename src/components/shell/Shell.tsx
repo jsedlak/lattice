@@ -1,13 +1,17 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Bot,
   FileText,
   LayoutDashboard,
   PanelLeftClose,
   PanelLeftOpen,
+  RotateCcw,
   Settings,
   Waypoints,
+  ZoomIn,
+  ZoomOut,
 } from "lucide-react";
 
 import { ConfirmProvider, Logo, LogoMark, ResizeHandle } from "@/components/ui";
@@ -27,6 +31,10 @@ const NAV = [
 const RECENT_COUNT = 5;
 const COLLAPSED_WIDTH = 64;
 
+const ZOOM_STEP = 0.1;
+const ZOOM_MIN = 0.5;
+const ZOOM_MAX = 2;
+
 export function Shell() {
   const location = useLocation();
   const [recent, setRecent] = useState<Doc[]>([]);
@@ -35,14 +43,57 @@ export function Shell() {
   const [resizing, setResizing] = useState(false);
   const widthRef = useRef(width);
 
+  const [zoom, setZoom] = useState(() => layoutBootCache().zoom);
+  const zoomRef = useRef(zoom);
+
   // Reconcile with settings.json — the boot cache can be stale or missing.
   useEffect(() => {
     void loadLayoutPrefs().then((p) => {
       setCollapsed(p.sidebarCollapsed);
       setWidth(p.sidebarWidth);
       widthRef.current = p.sidebarWidth;
+      setZoom(p.zoom);
+      zoomRef.current = p.zoom;
+      if (p.zoom !== 1) void getCurrentWebview().setZoom(p.zoom);
     });
   }, []);
+
+  /** dir: 1 zoom in, -1 zoom out, 0 reset to default. */
+  const changeZoom = useCallback((dir: -1 | 0 | 1) => {
+    const cur = zoomRef.current;
+    // Round to one decimal so repeated steps can't accumulate float drift.
+    const next =
+      dir === 0
+        ? 1
+        : Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round((cur + dir * ZOOM_STEP) * 10) / 10));
+    if (next === cur) return;
+    zoomRef.current = next;
+    setZoom(next);
+    void getCurrentWebview().setZoom(next);
+    saveLayoutPrefs({ zoom: next });
+  }, []);
+
+  // Ctrl/Cmd +/-/0 — capture phase so Monaco/CodeMirror can't swallow them.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        e.stopPropagation();
+        changeZoom(1);
+      } else if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        e.stopPropagation();
+        changeZoom(-1);
+      } else if (e.key === "0") {
+        e.preventDefault();
+        e.stopPropagation();
+        changeZoom(0);
+      }
+    }
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [changeZoom]);
 
   const toggleCollapsed = () => {
     const next = !collapsed;
@@ -219,6 +270,19 @@ export function Shell() {
         <main className="min-w-0 flex-1 overflow-hidden bg-background">
           <Outlet />
         </main>
+
+        {zoom !== 1 && (
+          <button
+            type="button"
+            onClick={() => changeZoom(0)}
+            title="Reset zoom (Ctrl+0)"
+            className="fixed bottom-4 right-4 z-50 flex animate-slide-up items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1.5 text-xs font-medium text-muted shadow-lg transition-colors hover:text-foreground"
+          >
+            {zoom > 1 ? <ZoomIn className="h-3.5 w-3.5" /> : <ZoomOut className="h-3.5 w-3.5" />}
+            {Math.round(zoom * 100)}%
+            <RotateCcw className="h-3 w-3 text-faint" />
+          </button>
+        )}
       </div>
     </ConfirmProvider>
   );
