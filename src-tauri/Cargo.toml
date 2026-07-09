@@ -40,6 +40,10 @@ keyring = { version = "3", features = ["sync-secret-service"] }
 keyring = { version = "3", features = ["windows-native"] }
 
 [profile.release]
-lto = true
-codegen-units = 1
+# Thin LTO, not fat: with candle in the tree, whole-graph LTO at one codegen
+# unit added minutes of uncachable work to every build for no measurable win
+# in a webview app — the embedding hot loops are optimized inside candle's
+# own crates either way.
+lto = "thin"
+codegen-units = 16
 strip = true
