@@ -178,7 +178,7 @@ export interface EndpointConfig {
   baseUrl?: string;
 }
 
-/** The built-in on-device embedding model (downloaded on first use, ~24 MB). */
+/** The built-in on-device embedding model (downloaded on first use, ~90 MB). */
 export const LOCAL_EMBEDDING = {
   kind: "local",
   model: "all-MiniLM-L6-v2",

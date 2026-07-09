@@ -34,9 +34,9 @@ pub async fn download_local_embedding_model(app: tauri::AppHandle) -> CmdResult<
         embedding::download_model(&state.models_dir, |p| {
             let _ = app.emit(embedding::PROGRESS_EVENT, p);
         })?;
-        let mut embedder = embedding::load(&state.models_dir)?;
+        let embedder = embedding::load(&state.models_dir)?;
         let smoke = embedder
-            .embed(vec!["lattice"], None)
+            .embed(&["lattice".to_string()])
             .map_err(|e| format!("embedding test failed: {e}"))?;
         if smoke.first().map(Vec::len) != Some(embedding::LOCAL_EMBEDDING_DIM) {
             return Err("embedding test returned unexpected dimensions".into());
@@ -60,8 +60,7 @@ pub async fn local_embed_texts(
         if guard.is_none() {
             *guard = Some(embedding::load(&state.models_dir)?);
         }
-        let embedder = guard.as_mut().expect("just initialized");
-        embedder.embed(texts, Some(32)).map_err(|e| e.to_string())
+        guard.as_ref().expect("just initialized").embed(&texts)
     })
     .await
     .map_err(err)?

@@ -64,7 +64,7 @@ export function LocalModelPanel({
         <Cpu className="h-3.5 w-3.5 shrink-0 text-muted" />
         <span className="text-[13px] font-medium">{LOCAL_EMBEDDING.model}</span>
         <span className="text-[11px] text-faint">
-          {LOCAL_EMBEDDING.dimensions} dims · ~24 MB · runs on this device
+          {LOCAL_EMBEDDING.dimensions} dims · ~90 MB · runs on this device
         </span>
         <span className="ml-auto" />
         {status === "checking" && <Spinner className="h-3.5 w-3.5" />}

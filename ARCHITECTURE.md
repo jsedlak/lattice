@@ -45,6 +45,7 @@ boundary as strings (`CmdResult<T> = Result<T, String>`).
 | `chat.rs` | conversations, messages, ingest jobs |
 | `settings.rs` | settings.json (merge-write), keychain secrets |
 | `workspace.rs` | workspace info/switching, files-mode sync, storage-mode migration |
+| `embedding.rs` | built-in local embedding: model download, on-device inference |
 
 ## Data model
 
@@ -79,6 +80,25 @@ vectors: the UI offers a full re-embed (`reset_embeddings` + reingest).
 Entity resolution: a new entity's embedding is KNN-matched against
 `vec_entities_{dim}`; a hit above `ENTITY_MERGE_THRESHOLD` (0.86, parity with
 the web app) merges instead of creating a duplicate.
+
+### Built-in local embeddings
+
+The default embedding provider needs no account: all-MiniLM-L6-v2 (384 dims)
+runs on-device in the Rust core (`src-tauri/src/embedding.rs`). The model
+(~90 MB of safetensors) is fetched from Hugging Face on first use into the
+machine-global models dir, with progress streamed to the UI as
+`local-embedding-progress` events; the download command finishes with a smoke
+embedding so "ready" is verified, not assumed. Inference is **candle** (pure
+Rust BERT + masked mean pooling + L2 norm — the sentence-transformers recipe),
+chosen deliberately over onnxruntime: prebuilt native binaries broke the
+release matrix (glibc floor on Linux, missing x86_64 macOS build), while
+candle compiles from source for every target. The frontend reaches it through
+the `"local"` endpoint kind, which `embedChunks`/`embedOne` route to the
+`local_embed_texts` command instead of an HTTP provider.
+
+First run is handled by an onboarding dialog (`src/components/onboarding/`)
+that walks through chat + embedding provider choice, defaulting to the local
+model, and records an `onboarded` flag in settings.json.
 
 ## Workspaces
 

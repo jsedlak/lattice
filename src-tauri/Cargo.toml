@@ -24,11 +24,11 @@ sqlite-vec = "0.1"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 parking_lot = "0.12"
-# Local embedding inference (ONNX). No hf-hub/image features — model files
-# are downloaded by src/embedding.rs with UI progress; rustls only affects the
-# build-time onnxruntime binary fetch.
-fastembed = { version = "5.17.2", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 ureq = "3.2.1"
+candle-core = "0.11.0"
+candle-nn = "0.11.0"
+candle-transformers = "0.11.0"
+tokenizers = "0.23.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

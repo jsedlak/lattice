@@ -25,7 +25,7 @@ pub struct AppState {
     /// Machine-global (not per-workspace) dir for downloaded ML models.
     pub models_dir: PathBuf,
     /// Lazily-loaded local embedding session.
-    pub embedder: Mutex<Option<fastembed::TextEmbedding>>,
+    pub embedder: Mutex<Option<embedding::Embedder>>,
 }
 
 impl AppState {
