@@ -56,9 +56,31 @@ const config: Config = {
           from: { opacity: "0" },
           to: { opacity: "1" },
         },
+        "fade-out": {
+          from: { opacity: "1" },
+          to: { opacity: "0" },
+        },
         "slide-up": {
           from: { opacity: "0", transform: "translateY(4px)" },
           to: { opacity: "1", transform: "translateY(0)" },
+        },
+        // Centered dialogs: a CSS animation REPLACES the element's transform
+        // while it runs, so these keyframes must carry the -50%,-50% centering
+        // themselves — animating bare translateY would fling the dialog to
+        // the bottom-right for the duration, then snap back.
+        "dialog-in": {
+          from: {
+            opacity: "0",
+            transform: "translate(-50%, calc(-50% - 1.5rem)) scale(0.97)",
+          },
+          to: { opacity: "1", transform: "translate(-50%, -50%) scale(1)" },
+        },
+        "dialog-out": {
+          from: { opacity: "1", transform: "translate(-50%, -50%) scale(1)" },
+          to: {
+            opacity: "0",
+            transform: "translate(-50%, calc(-50% - 0.75rem)) scale(0.98)",
+          },
         },
         "pulse-subtle": {
           "0%, 100%": { opacity: "1" },
@@ -67,7 +89,11 @@ const config: Config = {
       },
       animation: {
         "fade-in": "fade-in 0.18s ease-out",
+        "fade-out": "fade-out 0.15s ease-in forwards",
         "slide-up": "slide-up 0.2s ease-out",
+        // Drop in from above with a soft settle (iOS/Vaul-style ease-out).
+        "dialog-in": "dialog-in 0.32s cubic-bezier(0.32, 0.72, 0, 1)",
+        "dialog-out": "dialog-out 0.15s ease-in forwards",
         "pulse-subtle": "pulse-subtle 1.4s ease-in-out infinite",
       },
     },
