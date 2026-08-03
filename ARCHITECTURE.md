@@ -63,6 +63,16 @@ migrations, WAL mode, foreign keys on).
   Edge relations: `wikilink`, `tag` (origin `deterministic`) and `mentions`,
   `related` (origin `llm`). Deleting a document cascades to its chunks, nodes,
   and edges.
+- Folder structure is context (`src/lib/folder-context.ts`): every ancestor
+  folder name is slugified into a **tag** on the note, so `lattice/documentation/
+  readme.md` gets `#lattice` and `#documentation` — same tag nodes inline tags
+  produce, no new node type. Deliberately flat (no tag→tag hierarchy edges: a
+  tag sits at different depths under different paths, and deterministic edges
+  are replaced per source node, so a chain would flap between documents). The
+  ordered path is carried into the LLM extraction prompt instead. Since folder
+  tags are rebuilt from the document's current path, a move, folder rename, or
+  folder delete re-runs `rebuildFolderContext` for the affected notes
+  (`DocumentTree`) — content is unchanged, so ingest is *not* re-queued.
 - `entity` — extracted concepts/people/places with an embedding used for
   dedup.
 - `conversation` / `message` — assistant history, messages carry citation
@@ -191,7 +201,7 @@ persistence is Rust.
 ```
 parse (uploads: pdf/docx/xlsx → text)
   → chunk (token-aware)
-  → build deterministic graph (wikilinks, tags)
+  → build deterministic graph (wikilinks, tags, folder-path tags)
   → embed chunks → persist vectors (replace_chunks, atomic per document)
   → LLM extraction (entities + relationships, structured output)
   → resolve entities (embedding similarity ≥ 0.86 merges)

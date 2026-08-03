@@ -13,6 +13,7 @@
 import { generateObject } from "ai";
 
 import { chunkText } from "@/lib/chunk";
+import { folderPathLabel } from "@/lib/folder-context";
 import { buildDeterministic } from "@/lib/graph-build";
 import * as ipc from "@/lib/ipc";
 import type { JobStep } from "@/lib/types";
@@ -93,8 +94,9 @@ async function runIngest(documentId: string): Promise<void> {
     await ipc.updateDocument(documentId, { content: text });
   }
 
-  // ── deterministic graph (tags / wiki-links) ────────────────────────────────
-  await buildDeterministic(documentId, doc.title, text);
+  // ── deterministic graph (tags / wiki-links / folder path) ──────────────────
+  await buildDeterministic(documentId, doc.title, text, doc.folderId);
+  const folderPath = doc.folderId ? folderPathLabel(doc.folderId, await ipc.listFolders()) : null;
 
   // ── chunk ──────────────────────────────────────────────────────────────────
   await step(documentId, "chunk");
@@ -121,7 +123,7 @@ async function runIngest(documentId: string): Promise<void> {
   const chatKit = await getChatKit();
   if (chatKit && embeddingKit && chunks.length > 0) {
     await step(documentId, "extract");
-    const extraction = await extractGraphFromChunks(chunks);
+    const extraction = await extractGraphFromChunks(chunks, doc.title, folderPath);
     await step(documentId, "resolve");
     await resolveAndWrite(documentId, extraction);
   }
@@ -131,13 +133,30 @@ async function runIngest(documentId: string): Promise<void> {
 
 // ── extraction ────────────────────────────────────────────────────────────────
 
-/** PARITY: prompt construction copied from packages/ai/src/extract.ts. */
-function buildExtractPrompt(chunks: { content: string }[]): string {
+/**
+ * PARITY: prompt construction copied from packages/ai/src/extract.ts, with one
+ * desktop-only addition — the note's folder path, prepended as location
+ * context. The web app has no user-visible folder tree to draw it from.
+ * Extraction still binds to what the text states; the path only disambiguates
+ * names (a "Gateway" under billing/ is not the one under networking/).
+ */
+function buildExtractPrompt(
+  chunks: { content: string }[],
+  title: string,
+  folderPath: string | null,
+): string {
   const body = chunks.map((c, i) => `--- chunk ${i + 1} ---\n${c.content}`).join("\n\n");
-  return `Extract the salient entities and the relationships explicitly stated in the following text.\n\n${body}`;
+  const where = folderPath
+    ? `This note is titled "${title}" and is filed under "${folderPath}". Use that only to disambiguate names — do not extract entities that the text itself does not state.\n\n`
+    : "";
+  return `${where}Extract the salient entities and the relationships explicitly stated in the following text.\n\n${body}`;
 }
 
-async function extractGraphFromChunks(chunks: { content: string }[]): Promise<Extraction> {
+async function extractGraphFromChunks(
+  chunks: { content: string }[],
+  title: string,
+  folderPath: string | null,
+): Promise<Extraction> {
   if (chunks.length === 0) return { entities: [], relationships: [] };
   const kit = await getChatKit();
   if (!kit) return { entities: [], relationships: [] };
@@ -145,7 +164,7 @@ async function extractGraphFromChunks(chunks: { content: string }[]): Promise<Ex
     model: languageModelFor(kit.config, kit.apiKey),
     schema: ExtractionSchema,
     system: extractionSystemPrompt(),
-    prompt: buildExtractPrompt(chunks),
+    prompt: buildExtractPrompt(chunks, title, folderPath),
   });
   return object;
 }
