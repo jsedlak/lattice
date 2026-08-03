@@ -20,6 +20,8 @@ import {
   useConfirm,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { folderSubtreeIds } from "@/lib/folder-context";
+import { rebuildFolderContext } from "@/lib/graph-build";
 import {
   createFolder,
   createNote,
@@ -158,6 +160,16 @@ export function DocumentTree({
     return false;
   }
 
+  /**
+   * Documents whose folder path a change to `folderId`'s subtree affects — a
+   * folder rename, move, or delete shifts the derived tags of everything under
+   * it, not just its direct children.
+   */
+  function docsUnder(folderId: string): string[] {
+    const ids = folderSubtreeIds(folderId, folders);
+    return documents.filter((d) => d.folderId && ids.has(d.folderId)).map((d) => d.id);
+  }
+
   /** before/after by row half; folders also accept "into" in the middle band. */
   function rowPos(e: React.MouseEvent, canNest: boolean): "before" | "after" | "into" {
     const r = e.currentTarget.getBoundingClientRect();
@@ -250,48 +262,61 @@ export function DocumentTree({
   async function performDrop(payload: DragPayload, spot: NonNullable<DropSpot>) {
     if (payload.kind === "doc") {
       const docId = payload.id;
+      const from = documents.find((d) => d.id === docId)?.folderId ?? null;
+      let dest: string | null;
       if (spot.kind === "doc") {
         if (spot.id === docId) return;
         const target = documents.find((d) => d.id === spot.id);
         if (!target) return;
-        const dest = target.folderId ?? null;
+        dest = target.folderId ?? null;
         const ids = docIdsIn(dest).filter((id) => id !== docId);
         const at = ids.indexOf(spot.id) + (spot.pos === "after" ? 1 : 0);
         ids.splice(at, 0, docId);
         await reorderDocuments(dest, ids);
       } else {
         // Onto a folder row (any position) or the root background: move into it.
-        const dest = spot.kind === "folder" ? spot.id : null;
-        const ids = docIdsIn(dest).filter((id) => id !== docId);
+        const into = spot.kind === "folder" ? spot.id : null;
+        dest = into;
+        const ids = docIdsIn(into).filter((id) => id !== docId);
         ids.push(docId);
-        await reorderDocuments(dest, ids);
-        if (dest) setExpanded((p) => new Set(p).add(dest));
+        await reorderDocuments(into, ids);
+        if (into) setExpanded((p) => new Set(p).add(into));
       }
+      // A reorder within the same folder doesn't change the note's path.
+      if (dest !== from) await rebuildFolderContext([docId]);
       onRefresh();
     } else {
       const folderId = payload.id;
       if (spot.kind === "doc") return;
+      const from = folders.find((f) => f.id === folderId)?.parentId ?? null;
+      // Snapshot before the move: the subtree walk needs the pre-move tree.
+      const affected = docsUnder(folderId);
+      let dest: string | null;
       if (spot.kind === "folder") {
         if (spot.id === folderId || underneath(spot.id, folderId)) return;
         const target = folders.find((f) => f.id === spot.id);
         if (!target) return;
         if (spot.pos === "into") {
+          dest = spot.id;
           const ids = folderIdsIn(spot.id).filter((id) => id !== folderId);
           ids.push(folderId);
           await reorderFolders(spot.id, ids);
           setExpanded((p) => new Set(p).add(spot.id));
         } else {
-          const dest = target.parentId ?? null;
+          dest = target.parentId ?? null;
           const ids = folderIdsIn(dest).filter((id) => id !== folderId);
           const at = ids.indexOf(spot.id) + (spot.pos === "after" ? 1 : 0);
           ids.splice(at, 0, folderId);
           await reorderFolders(dest, ids);
         }
       } else {
+        dest = null;
         const ids = folderIdsIn(null).filter((id) => id !== folderId);
         ids.push(folderId);
         await reorderFolders(null, ids);
       }
+      // Re-parenting shifts the path of every note beneath the folder.
+      if (dest !== from) await rebuildFolderContext(affected);
       onRefresh();
     }
   }
@@ -381,6 +406,7 @@ export function DocumentTree({
                   disabled={t.id === (doc.folderId ?? null)}
                   onSelect={async () => {
                     await moveDocument(doc.id, t.id);
+                    await rebuildFolderContext([doc.id]);
                     onRefresh();
                   }}
                 >
@@ -466,8 +492,11 @@ export function DocumentTree({
                 <InlineRename
                   initial={folder.name}
                   onSubmit={async (name) => {
+                    const affected = docsUnder(folder.id);
                     await renameFolder(folder.id, name);
                     setRenaming(null);
+                    // The folder's name is a tag on every note beneath it.
+                    await rebuildFolderContext(affected);
                     onRefresh();
                   }}
                   onCancel={() => setRenaming(null)}
@@ -501,7 +530,10 @@ export function DocumentTree({
                     destructive: true,
                   })
                 ) {
+                  const affected = docsUnder(folder.id);
                   await deleteFolder(folder.id);
+                  // Notes move up a level, so they lose this path segment.
+                  await rebuildFolderContext(affected);
                   onRefresh();
                 }
               }}

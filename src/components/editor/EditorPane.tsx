@@ -77,7 +77,12 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         }
         // Deterministic graph rebuild + LLM ingest on every content save.
         if (patch.content !== undefined) {
-          await buildDeterministic(doc.id, patch.title ?? saved.title, patch.content);
+          await buildDeterministic(
+            doc.id,
+            patch.title ?? saved.title,
+            patch.content,
+            saved.folderId,
+          );
           enqueueIngest(doc.id);
         }
         // When the title changed, reload the document list (sidebar + tabs)
