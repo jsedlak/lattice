@@ -225,6 +225,9 @@ export const syncWorkspace = () => invoke<SyncReport>("sync_workspace");
 export const setStorageMode = (mode: StorageMode) =>
   invoke<SyncReport>("set_storage_mode", { mode });
 
+/** Workspace-relative paths under files/ — editor link/image completion. */
+export const listWorkspaceFiles = () => invoke<string[]>("list_workspace_files");
+
 // ── Local embedding ──────────────────────────────────────────────────────────
 
 export const localEmbeddingStatus = () =>

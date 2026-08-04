@@ -376,6 +376,43 @@ fn export_notes(conn: &Connection, ws: &Path) -> CmdResult<SyncReport> {
     Ok(report)
 }
 
+/// Workspace-relative paths under `files/`, for the editor's link/image path
+/// completion. Read-only and shallow in intent: it walks the uploads tree,
+/// skips dotfiles, and caps the result so a workspace with thousands of
+/// uploads can't stall a keystroke. `notes/` is deliberately excluded —
+/// linking to another note is what `[[wiki-links]]` are for.
+#[tauri::command]
+pub fn list_workspace_files(state: State<AppState>) -> CmdResult<Vec<String>> {
+    const LIMIT: usize = 500;
+    let root = state.workspace_dir.join("files");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= LIMIT {
+            break;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(&state.workspace_dir) {
+                if out.len() >= LIMIT {
+                    break;
+                }
+                out.push(workspace::rel_to_string(rel));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

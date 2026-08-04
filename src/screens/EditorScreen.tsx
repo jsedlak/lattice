@@ -10,6 +10,7 @@ import { UploadDetail } from "@/components/editor/UploadDetail";
 import { ResizeHandle, Spinner } from "@/components/ui";
 import { findDocumentByTitle, getDocument, listDocuments, listFolders } from "@/lib/ipc";
 import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
+import { invalidateCompletionCaches } from "@/lib/completions";
 import { closeTab, openTab, pruneTabs, useOpenTabIds } from "@/lib/open-tabs";
 import type { Doc, Folder } from "@/lib/types";
 
@@ -48,6 +49,9 @@ export function EditorScreen() {
     const [docs, fs] = await Promise.all([listDocuments(), listFolders()]);
     setDocuments(docs);
     setFolders(fs);
+    // Every document mutation funnels through here, so it's the one place that
+    // can keep completion (wiki-link titles, file paths) from going stale.
+    invalidateCompletionCaches();
   }, []);
 
   React.useEffect(() => {
