@@ -11,6 +11,13 @@ on:
       - "src-tauri/Cargo.toml"
       - "src-tauri/Cargo.lock"
       - ".github/workflows/cache-warm.yml"
+  # The cache key also covers the rustc version, which no path filter can
+  # watch: every stable Rust release silently invalidates the cache, and
+  # without a rebuild the next tag would pay the cold compile (v0.6.0 ate 38
+  # minutes exactly this way). A weekly run absorbs toolchain drift off the
+  # release path. A hit is nearly free — it restores and recompiles nothing.
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
   workflow_dispatch:
 
 jobs:
@@ -54,6 +61,11 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # MUST match release.yml. Without it the key embeds the job id
+          # (`warm` here, `build` there), so release runs looked up
+          # `v0-rust-build-…` while this job only ever saved `v0-rust-warm-…`
+          # — a guaranteed miss that made every warm run dead weight.
+          shared-key: tauri-release
 
       # generate_context! needs the frontendDist dir to exist at compile time.
       - name: Build frontend
