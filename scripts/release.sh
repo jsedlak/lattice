@@ -52,8 +52,15 @@ bump_json "$CONF"
 bump_json "package.json"
 
 # Cargo.toml + lockfile (first `version =` line is the package's own).
-sed -i.bak "0,/^version = \".*\"/s//version = \"$VERSION\"/" src-tauri/Cargo.toml
-rm -f src-tauri/Cargo.toml.bak
+# awk, not `sed -i "0,/re/s//.../"`: the 0-address form is a GNU extension that
+# BSD/macOS sed accepts and then silently no-ops, which shipped v0.6.0's first
+# attempt with Cargo.toml still on the old version — and exited 0, so `set -e`
+# never noticed. Verified below rather than trusted.
+awk -v v="$VERSION" '
+  !done && /^version = "/ { sub(/"[^"]*"/, "\"" v "\""); done = 1 }
+  { print }
+' src-tauri/Cargo.toml > src-tauri/Cargo.toml.new
+mv src-tauri/Cargo.toml.new src-tauri/Cargo.toml
 if command -v cargo >/dev/null 2>&1; then
   (cd src-tauri && cargo update --workspace --offline --quiet)
 else
@@ -77,6 +84,20 @@ fi
 METAINFO="src-tauri/assets/app.lattice.desktop.metainfo.xml"
 sed -i.bak "s|<release version=\"[^\"]*\" date=\"[^\"]*\" />|<release version=\"$VERSION\" date=\"$(date +%F)\" />|" "$METAINFO"
 rm -f "$METAINFO.bak"
+
+# ── Verify every bump actually landed ─────────────────────────────────────────
+# In-place edits across four formats and two sed dialects fail quietly too
+# easily; a release tag that disagrees with the crate version is worth one
+# grep each to prevent.
+check() { # file, pattern
+  grep -q "$2" "$1" || die "version bump did not apply to $1 — expected $2"
+}
+check "$CONF" "\"version\": \"$VERSION\""
+check package.json "\"version\": \"$VERSION\""
+check src-tauri/Cargo.toml "^version = \"$VERSION\""
+check "$METAINFO" "<release version=\"$VERSION\""
+grep -A1 '^name = "lattice-desktop"$' src-tauri/Cargo.lock | grep -q "^version = \"$VERSION\"" \
+  || die "version bump did not apply to src-tauri/Cargo.lock"
 
 # ── Commit, tag, push ─────────────────────────────────────────────────────────
 git add "$CONF" package.json src-tauri/Cargo.toml src-tauri/Cargo.lock "$METAINFO"
