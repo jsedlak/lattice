@@ -18,6 +18,9 @@ export interface LayoutPrefs {
   editorSplit: number;
   /** Webview zoom factor (Ctrl+/- global font size), 1 = default. */
   zoom: number;
+  /** Documents open as editor tabs, in tab-bar order. Ids may be stale — the
+   * editor prunes ones that no longer resolve. */
+  openTabIds: string[];
 }
 
 export const LAYOUT_DEFAULTS: LayoutPrefs = {
@@ -26,6 +29,7 @@ export const LAYOUT_DEFAULTS: LayoutPrefs = {
   treeWidth: 288,
   editorSplit: 0.5,
   zoom: 1,
+  openTabIds: [],
 };
 
 const CACHE_KEY = "lattice.layout";

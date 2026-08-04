@@ -35,12 +35,63 @@ impl AppState {
     }
 }
 
+/// macOS owns Cmd+W through the app menu: `NSMenu` matches key equivalents
+/// before the event ever reaches the webview, so the editor's "close the
+/// active tab" binding is unreachable while the default menu's *Close Window*
+/// item exists. Tauri only installs a default menu on macOS, so this replaces
+/// it with the same standard set minus that one item — the rest has to be
+/// rebuilt by hand, because dropping the default would also drop the Edit menu
+/// that Cmd+C/Cmd+V depend on. The window still closes via the red button,
+/// Cmd+Q, or the Window menu.
+#[cfg(target_os = "macos")]
+fn build_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder};
+
+    let app_menu = SubmenuBuilder::new(app, "Lattice")
+        .about(Some(AboutMetadata::default()))
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+    let window_menu = SubmenuBuilder::new(app, "Window").minimize().maximize().build()?;
+
+    let menu = MenuBuilder::new(app)
+        .items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
+        .build()?;
+    app.set_menu(menu)?;
+    Ok(())
+}
+
+/// Other platforms get no default menu from Tauri, so Cmd/Ctrl+W already
+/// reaches the webview untouched.
+#[cfg(not(target_os = "macos"))]
+fn build_menu(_app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            build_menu(app.handle())?;
+
             let default_workspace_dir = app.path().app_data_dir()?;
             let config_dir = app.path().app_config_dir()?;
             fs::create_dir_all(&config_dir)?;
