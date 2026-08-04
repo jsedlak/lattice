@@ -113,8 +113,25 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
     [persist],
   );
 
-  // Flush on unmount.
-  React.useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
+  // Flush on unmount — actually persist, don't just drop the timer. The pane
+  // is keyed by document id, so switching tabs unmounts it: anything typed
+  // inside the last AUTOSAVE_MS would otherwise be silently lost. The write
+  // deliberately outlives the component (it also rebuilds the graph and
+  // queues ingest); the ref keeps it from closing over a stale `persist`.
+  const persistRef = React.useRef(persist);
+  persistRef.current = persist;
+  React.useEffect(
+    () => () => {
+      if (!timer.current) return;
+      clearTimeout(timer.current);
+      const flush = pending.current;
+      pending.current = {};
+      if (flush.title !== undefined || flush.content !== undefined) {
+        void persistRef.current(flush);
+      }
+    },
+    [],
+  );
 
   // Ctrl/Cmd-S explicit save, Ctrl/Cmd-P toggle preview.
   React.useEffect(() => {

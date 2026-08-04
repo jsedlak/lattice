@@ -1,23 +1,28 @@
 import { PenLine } from "lucide-react";
 import * as React from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import { CreateNotePrompt } from "@/components/editor/CreateNotePrompt";
 import { DocumentTabs, type EditorTab } from "@/components/editor/DocumentTabs";
 import { EditorPane } from "@/components/editor/EditorPane";
+import { OpenTabs } from "@/components/editor/OpenTabs";
 import { UploadDetail } from "@/components/editor/UploadDetail";
 import { ResizeHandle, Spinner } from "@/components/ui";
 import { findDocumentByTitle, getDocument, listDocuments, listFolders } from "@/lib/ipc";
 import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
+import { closeTab, openTab, pruneTabs, useOpenTabIds } from "@/lib/open-tabs";
 import type { Doc, Folder } from "@/lib/types";
 
 /**
  * The editor screen — desktop port of the web app's /editor page. The selected
  * document comes from the /editor/:id route param (the web app used ?doc=);
- * ?title= (wiki-link navigation) and ?tab= keep their web meanings.
+ * ?title= (wiki-link navigation) and ?tab= keep their web meanings. That route
+ * param is also the active editor tab — see lib/open-tabs.ts.
  */
 export function EditorScreen() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const openIds = useOpenTabIds();
   const [searchParams] = useSearchParams();
   const titleParam = searchParams.get("title");
   const tabParam = searchParams.get("tab");
@@ -60,13 +65,18 @@ export function EditorScreen() {
         if (cancelled) return;
         setSelected(doc);
         setCreateTitle(null);
+        if (doc) openTab(doc.id);
       } else if (titleParam) {
         const doc = await findDocumentByTitle(titleParam);
         if (cancelled) return;
         setSelected(doc);
         setCreateTitle(doc ? null : titleParam);
+        if (doc) openTab(doc.id);
       } else {
-        setSelected(documents.find((d) => d.kind === "note") ?? null);
+        // No document in the URL. With tabs, "nothing open" is a real state —
+        // don't silently adopt the first note, or closing the last tab would
+        // immediately reopen something.
+        setSelected(null);
         setCreateTitle(null);
       }
     })();
@@ -87,6 +97,50 @@ export function EditorScreen() {
   }, [documents, refresh]);
 
   const onRefresh = React.useCallback(() => void refresh(), [refresh]);
+
+  // Drop tabs whose document is gone — deleted here, or by a files-mode sync.
+  React.useEffect(() => {
+    if (documents === null) return;
+    pruneTabs(new Set(documents.map((d) => d.id)));
+  }, [documents]);
+
+  // Tab labels come from the document list, so renames land after a refresh().
+  const tabDocs = React.useMemo(() => {
+    const byId = new Map((documents ?? []).map((d) => [d.id, d]));
+    return openIds.map((tid) => byId.get(tid)).filter((d): d is Doc => Boolean(d));
+  }, [documents, openIds]);
+
+  const activeId = selected?.id ?? null;
+
+  const onCloseTab = React.useCallback(
+    (tabId: string) => {
+      const next = closeTab(tabId);
+      // Closing a background tab leaves the current document alone.
+      if (tabId !== activeId) return;
+      navigate(next ? `/editor/${next}` : "/editor");
+    },
+    [activeId, navigate],
+  );
+
+  const onActivateTab = React.useCallback(
+    (tabId: string) => navigate(`/editor/${tabId}`),
+    [navigate],
+  );
+
+  // Ctrl/Cmd+W closes the active tab. Capture phase so Monaco/CodeMirror can't
+  // swallow it — and note the macOS menu is what actually owns this chord, so
+  // src-tauri drops the default Close Window item for the webview to see it.
+  React.useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
+      if (e.key.toLowerCase() !== "w") return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (activeId) onCloseTab(activeId);
+    }
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [activeId, onCloseTab]);
 
   if (documents === null) {
     return (
@@ -119,18 +173,26 @@ export function EditorScreen() {
         }}
         onEnd={() => saveLayoutPrefs({ treeWidth: treeWidthRef.current })}
       />
-      <div className="h-full min-w-0 flex-1">
-        {selected ? (
-          selected.kind === "upload" ? (
-            <UploadDetail key={selected.id} doc={selected} />
+      <div className="flex h-full min-w-0 flex-1 flex-col">
+        <OpenTabs
+          tabs={tabDocs}
+          activeId={activeId}
+          onActivate={onActivateTab}
+          onClose={onCloseTab}
+        />
+        <div className="min-h-0 flex-1">
+          {selected ? (
+            selected.kind === "upload" ? (
+              <UploadDetail key={selected.id} doc={selected} />
+            ) : (
+              <EditorPane key={selected.id} doc={selected} onRefresh={onRefresh} />
+            )
+          ) : createTitle ? (
+            <CreateNotePrompt title={createTitle} onRefresh={onRefresh} />
           ) : (
-            <EditorPane key={selected.id} doc={selected} onRefresh={onRefresh} />
-          )
-        ) : createTitle ? (
-          <CreateNotePrompt title={createTitle} onRefresh={onRefresh} />
-        ) : (
-          <EmptyEditor />
-        )}
+            <EmptyEditor />
+          )}
+        </div>
       </div>
     </div>
   );
