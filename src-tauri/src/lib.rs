@@ -168,6 +168,7 @@ pub fn run() {
             commands::workspace::restart_app,
             commands::workspace::sync_workspace,
             commands::workspace::set_storage_mode,
+            commands::workspace::list_workspace_files,
             // local embedding
             commands::embedding::local_embedding_status,
             commands::embedding::download_local_embedding_model,

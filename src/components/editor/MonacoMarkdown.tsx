@@ -2,6 +2,8 @@ import * as monaco from "monaco-editor";
 import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
 import * as React from "react";
 
+import { completeAt, type CompletionKind } from "@/lib/completions";
+
 /**
  * Monaco-based markdown editor — the default engine (see AppSettings.editor).
  * Self-hosted (no CDN loader): the editor ships in the bundle and the base
@@ -46,6 +48,75 @@ monaco.editor.defineTheme("lattice-light", {
     "editorWidget.background": "#f0f0ee",
     "scrollbarSlider.background": "#d3d3cd80",
     "scrollbarSlider.hoverBackground": "#d3d3cd",
+  },
+});
+
+/** Monaco's icon vocabulary — closest match per completion kind. */
+const MONACO_KIND: Record<CompletionKind, monaco.languages.CompletionItemKind> = {
+  tag: monaco.languages.CompletionItemKind.Keyword,
+  wikilink: monaco.languages.CompletionItemKind.Reference,
+  path: monaco.languages.CompletionItemKind.File,
+  snippet: monaco.languages.CompletionItemKind.Snippet,
+};
+
+/**
+ * Adapter over the shared completion core (lib/completions) — the same source
+ * the CodeMirror engine uses, so both editors offer identical completions.
+ *
+ * Registered once at module scope, NOT per editor instance: EditorPane remounts
+ * this component for every document (key={doc.id}), and a provider registered
+ * in the effect would stack a duplicate on each remount, multiplying every
+ * suggestion.
+ */
+monaco.languages.registerCompletionItemProvider("markdown", {
+  // `#` and `[` open tag/wiki-link contexts; `(` covers `](`, `/` the slash
+  // menu. Trigger characters fire even with quickSuggestions off, which is how
+  // prose stays quiet while these contexts still complete.
+  triggerCharacters: ["#", "[", "(", "/"],
+  async provideCompletionItems(model, position, context) {
+    const before = model.getValueInRange({
+      startLineNumber: 1,
+      startColumn: 1,
+      endLineNumber: position.lineNumber,
+      endColumn: position.column,
+    });
+    // Ctrl+Space (Invoke) offers the snippet catalog anywhere; typing a
+    // trigger character does not.
+    const explicit = context.triggerKind === monaco.languages.CompletionTriggerKind.Invoke;
+    const result = await completeAt(before, explicit);
+    if (!result || result.items.length === 0) return { suggestions: [] };
+
+    const start = model.getPositionAt(result.from);
+    const range = new monaco.Range(
+      start.lineNumber,
+      start.column,
+      position.lineNumber,
+      position.column,
+    );
+    return {
+      suggestions: result.items.map((item) => {
+        // Monaco's own snippet syntax uses $0 for the final cursor stop, which
+        // is exactly the marker the shared catalog uses — hand it over as-is
+        // rather than pre-splicing it.
+        const isSnippet = item.insert.includes("$0");
+        return {
+          label: item.label,
+          detail: item.detail,
+          kind: MONACO_KIND[item.kind],
+          // Monaco filters against the whole replaced range, which for the
+          // slash menu starts at the `/`. Without it in filterText, every
+          // snippet vanishes as soon as a character follows the slash.
+          filterText: (result.filterPrefix ?? "") + item.label,
+          insertText: item.insert,
+          insertTextRules: isSnippet
+            ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+            : undefined,
+          range,
+        };
+      }),
+      // Offsets shift as the user keeps typing; let Monaco re-query.
+      incomplete: true,
+    };
   },
 });
 
