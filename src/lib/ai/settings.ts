@@ -19,14 +19,33 @@ interface Loaded {
   embeddingApiKey: string | null;
 }
 
-let cache: Loaded | null = null;
+/**
+ * The in-flight promise, not the resolved value — the difference matters. Boot
+ * resumes every pending ingest job at once, and each one asks for its chat and
+ * embedding kits; caching only the result let all of them miss simultaneously
+ * and fire their own getSecret pair. On macOS each of those is a keychain
+ * prompt, so ten queued documents meant twenty password dialogs. Caching the
+ * promise collapses the stampede into one read.
+ */
+let cache: Promise<Loaded> | null = null;
 
 export function invalidateAiSettings(): void {
   cache = null;
 }
 
-async function load(): Promise<Loaded> {
-  if (cache) return cache;
+function load(): Promise<Loaded> {
+  if (!cache) {
+    // A failed load must not be cached, or the app never recovers from a
+    // transient IPC error without a restart.
+    cache = read().catch((e) => {
+      cache = null;
+      throw e;
+    });
+  }
+  return cache;
+}
+
+async function read(): Promise<Loaded> {
   const [raw, chatApiKey, embeddingApiKey] = await Promise.all([
     ipc.getSettings(),
     ipc.getSecret("chat-api-key"),
@@ -37,8 +56,7 @@ async function load(): Promise<Loaded> {
     embedding: { ...DEFAULT_SETTINGS.embedding, ...(raw?.embedding ?? {}) },
     editor: raw?.editor === "codemirror" ? "codemirror" : DEFAULT_SETTINGS.editor,
   };
-  cache = { settings, chatApiKey, embeddingApiKey };
-  return cache;
+  return { settings, chatApiKey, embeddingApiKey };
 }
 
 export async function loadSettings(): Promise<AppSettings> {

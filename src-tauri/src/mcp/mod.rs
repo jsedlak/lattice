@@ -90,14 +90,23 @@ pub fn save_config<R: Runtime>(app: &AppHandle<R>, config: McpConfig) -> Result<
 
 // ── Token ────────────────────────────────────────────────────────────────────
 
+/// Reads the token without creating one. `status` uses this: reporting state
+/// must never write to the keychain, which on macOS can mean a password prompt
+/// just for opening the settings tab.
+fn read_token<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+    settings::get_secret(app.state::<AppState>(), TOKEN_SECRET.to_string())
+        .ok()
+        .flatten()
+        .filter(|t| !t.is_empty())
+}
+
 /// Returns the bearer token, minting one on first use. 256 bits of v4 UUID —
 /// `uuid` is already a dependency, so this avoids pulling in an RNG crate.
+/// Only the paths that actually need a live token call this: starting the
+/// server, and regenerating on request.
 pub fn ensure_token<R: Runtime>(app: &AppHandle<R>) -> Result<String, String> {
-    let state = app.state::<AppState>();
-    if let Some(existing) = settings::get_secret(state, TOKEN_SECRET.to_string())? {
-        if !existing.is_empty() {
-            return Ok(existing);
-        }
+    if let Some(existing) = read_token(app) {
+        return Ok(existing);
     }
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     settings::set_secret(app.state::<AppState>(), TOKEN_SECRET.to_string(), token.clone())?;
@@ -188,7 +197,7 @@ pub fn status<R: Runtime>(app: &AppHandle<R>, error: Option<String>) -> McpStatu
         port: config.port,
         running: bound_port.is_some(),
         bound_port,
-        token: ensure_token(app).ok(),
+        token: read_token(app),
         error,
         workspace_path: state.workspace_dir.to_string_lossy().into_owned(),
     }
@@ -271,6 +280,7 @@ mod tests {
             models_dir: dir.join("models"),
             embedder: Mutex::new(None),
             mcp: Mutex::new(None),
+            secrets: Mutex::new(std::collections::HashMap::new()),
         });
         (app, doc_id, doc_node)
     }
@@ -392,6 +402,27 @@ mod tests {
         assert_eq!(status, 200);
 
         drop(handle);
+    }
+
+    /// Reporting status must never write a secret. It used to call
+    /// ensure_token, so merely opening Settings → MCP minted a token — which on
+    /// macOS is an OS password prompt for a read-only action.
+    #[test]
+    fn status_reports_a_missing_token_without_creating_one() {
+        let dir = scratch("statustoken");
+        let (app, _, _) = seeded_app(&dir);
+        // Seeding the cache with a miss keeps this test off the real keychain
+        // and stands in for "no token has ever been issued".
+        app.state::<AppState>().secrets.lock().insert(TOKEN_SECRET.to_string(), None);
+
+        let reported = status(app.handle(), None);
+        assert!(reported.token.is_none(), "status invented a token");
+        assert!(!reported.enabled && !reported.running);
+        assert_eq!(
+            app.state::<AppState>().secrets.lock().get(TOKEN_SECRET),
+            Some(&None),
+            "status wrote a token behind the caller's back",
+        );
     }
 
     /// Semantic search is the one tool that needs a model. With none configured
