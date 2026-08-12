@@ -59,7 +59,9 @@ pub struct McpStatus {
     pub running: bool,
     /// The port currently bound; None when not running.
     pub bound_port: Option<u16>,
-    pub token: Option<String>,
+    /// Deliberately absent: the token lives in the keychain, and unlocking it
+    /// can cost an OS password prompt. Reporting status must be free, so the
+    /// token is fetched only when the user asks for it (`mcp_token`).
     /// Why the last start attempt failed (port in use, permissions…).
     pub error: Option<String>,
     /// The workspace being served, so the UI can say what agents will see.
@@ -90,9 +92,8 @@ pub fn save_config<R: Runtime>(app: &AppHandle<R>, config: McpConfig) -> Result<
 
 // ── Token ────────────────────────────────────────────────────────────────────
 
-/// Reads the token without creating one. `status` uses this: reporting state
-/// must never write to the keychain, which on macOS can mean a password prompt
-/// just for opening the settings tab.
+/// Reads the token without creating one. Unlocks the secret store, so only
+/// call it from paths the user explicitly asked for.
 fn read_token<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     settings::get_secret(app.state::<AppState>(), TOKEN_SECRET.to_string())
         .ok()
@@ -197,7 +198,6 @@ pub fn status<R: Runtime>(app: &AppHandle<R>, error: Option<String>) -> McpStatu
         port: config.port,
         running: bound_port.is_some(),
         bound_port,
-        token: read_token(app),
         error,
         workspace_path: state.workspace_dir.to_string_lossy().into_owned(),
     }
@@ -280,7 +280,7 @@ mod tests {
             models_dir: dir.join("models"),
             embedder: Mutex::new(None),
             mcp: Mutex::new(None),
-            secrets: Mutex::new(std::collections::HashMap::new()),
+            secrets: Mutex::new(None),
         });
         (app, doc_id, doc_node)
     }
@@ -404,24 +404,25 @@ mod tests {
         drop(handle);
     }
 
-    /// Reporting status must never write a secret. It used to call
-    /// ensure_token, so merely opening Settings → MCP minted a token — which on
-    /// macOS is an OS password prompt for a read-only action.
+    /// Opening Settings → MCP must cost nothing. `status` used to report the
+    /// token, which meant reading (and minting) it — on macOS an OS password
+    /// prompt for what is a read-only glance at some state.
+    ///
+    /// `AppState.secrets` stays `None` until something unlocks the store, so an
+    /// untouched `None` afterwards is proof no keychain access happened. It also
+    /// keeps this test off the real keychain.
     #[test]
-    fn status_reports_a_missing_token_without_creating_one() {
+    fn status_does_not_unlock_the_secret_store() {
         let dir = scratch("statustoken");
         let (app, _, _) = seeded_app(&dir);
-        // Seeding the cache with a miss keeps this test off the real keychain
-        // and stands in for "no token has ever been issued".
-        app.state::<AppState>().secrets.lock().insert(TOKEN_SECRET.to_string(), None);
+        assert!(app.state::<AppState>().secrets.lock().is_none(), "precondition");
 
         let reported = status(app.handle(), None);
-        assert!(reported.token.is_none(), "status invented a token");
         assert!(!reported.enabled && !reported.running);
-        assert_eq!(
-            app.state::<AppState>().secrets.lock().get(TOKEN_SECRET),
-            Some(&None),
-            "status wrote a token behind the caller's back",
+
+        assert!(
+            app.state::<AppState>().secrets.lock().is_none(),
+            "status touched the secret store — that is a password prompt on macOS",
         );
     }
 

@@ -18,7 +18,12 @@ import type {
 } from "@/lib/types";
 import { DEFAULT_SETTINGS, LOCAL_EMBEDDING } from "@/lib/types";
 import { languageModelFor } from "@/lib/ai/providers";
-import { invalidateAiSettings, loadSettings, saveSettings } from "@/lib/ai/settings";
+import {
+  invalidateAiSettings,
+  loadSettings,
+  saveSettings,
+  storedSecrets,
+} from "@/lib/ai/settings";
 import { enqueueIngest, reingestAll } from "@/lib/ingest/pipeline";
 
 const EDITOR_OPTIONS: { value: EditorChoice; label: string; hint: string }[] = [
@@ -66,12 +71,13 @@ export function SettingsScreen() {
       const s = await loadSettings();
       setSettings(s);
       setInitialEmbedding(`${s.embedding.kind}:${s.embedding.model}:${s.embedding.dimensions}`);
-      const [ck, ek, ws] = await Promise.all([
-        ipc.getSecret("chat-api-key"),
-        ipc.getSecret("embedding-api-key"),
-        ipc.getWorkspaceInfo(),
-      ]);
-      setStored({ chat: ck !== null, embedding: ek !== null });
+      // Presence only — reading the key *values* here would unlock the OS
+      // keychain (a password prompt) just for rendering two badges.
+      const [present, ws] = await Promise.all([storedSecrets(), ipc.getWorkspaceInfo()]);
+      setStored({
+        chat: present.has("chat-api-key"),
+        embedding: present.has("embedding-api-key"),
+      });
       setWorkspace(ws);
     })();
   }, []);

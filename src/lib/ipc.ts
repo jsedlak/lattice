@@ -30,6 +30,7 @@ import type {
   SecretName,
   SimilarEntity,
   StorageMode,
+  StoredSettings,
   SyncReport,
   TraversalResult,
   WorkspaceInfo,
@@ -250,6 +251,10 @@ export const localEmbedTexts = (texts: string[]) =>
 
 export const mcpStatus = () => invoke<McpStatus>("mcp_status");
 
+/** Fetches (creating if needed) the bearer token. Unlocks the OS keychain, so
+ *  call it only from an explicit user action — never on mount. */
+export const mcpToken = () => invoke<string>("mcp_token");
+
 /** Persists enabled/port and applies it now; bind failures come back in `error`. */
 export const setMcpConfig = (enabled: boolean, port: number) =>
   invoke<McpStatus>("set_mcp_config", { enabled, port });
@@ -262,7 +267,7 @@ export const testMcpEmbedding = () => invoke<number>("test_mcp_embedding");
 
 // ── Settings & secrets ───────────────────────────────────────────────────────
 
-export const getSettings = () => invoke<AppSettings | null>("get_settings");
+export const getSettings = () => invoke<StoredSettings | null>("get_settings");
 export const setSettings = (settings: AppSettings) => invoke<void>("set_settings", { settings });
 export const getSecret = (name: SecretName) => invoke<string | null>("get_secret", { name });
 export const setSecret = (name: SecretName, value: string) =>

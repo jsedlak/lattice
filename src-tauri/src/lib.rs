@@ -29,9 +29,10 @@ pub struct AppState {
     pub embedder: Mutex<Option<embedding::Embedder>>,
     /// The MCP server, when it is listening. Holds its shutdown trigger.
     pub mcp: Mutex<Option<mcp::McpHandle>>,
-    /// Keychain reads, memoized for the process lifetime (including misses).
-    /// Each real read can be an OS password prompt; see commands/settings.rs.
-    pub secrets: Mutex<std::collections::HashMap<String, Option<String>>>,
+    /// The secret store, loaded from the keychain once per process. `None` until
+    /// something actually needs a secret — loading it can cost an OS password
+    /// prompt, so navigation must never trigger it. See commands/settings.rs.
+    pub secrets: Mutex<Option<serde_json::Map<String, serde_json::Value>>>,
 }
 
 impl AppState {
@@ -124,7 +125,7 @@ pub fn run() {
                 models_dir,
                 embedder: Mutex::new(None),
                 mcp: Mutex::new(None),
-                secrets: Mutex::new(std::collections::HashMap::new()),
+                secrets: Mutex::new(None),
             });
             // After manage(): the server resolves its config through AppState.
             mcp::start_if_enabled(app.handle());
@@ -186,6 +187,7 @@ pub fn run() {
             commands::embedding::local_embed_texts,
             // MCP server
             commands::mcp::mcp_status,
+            commands::mcp::mcp_token,
             commands::mcp::set_mcp_config,
             commands::mcp::regenerate_mcp_token,
             commands::mcp::test_mcp_embedding,

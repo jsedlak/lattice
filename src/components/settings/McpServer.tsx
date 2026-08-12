@@ -46,6 +46,23 @@ export function McpServer() {
   const [busy, setBusy] = useState(false);
   const [revealed, setRevealed] = useState(false);
   const [test, setTest] = useState<TestState>({ status: "idle" });
+  /**
+   * null until the user asks for it. Fetching the token unlocks the OS keychain,
+   * which can be a password prompt — merely opening this tab must never cost
+   * one, so nothing here reads it on mount.
+   */
+  const [token, setToken] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
+
+  const revealToken = async () => {
+    setUnlocking(true);
+    try {
+      setToken(await ipc.mcpToken());
+      setRevealed(true);
+    } finally {
+      setUnlocking(false);
+    }
+  };
 
   useEffect(() => {
     void (async () => {
@@ -88,7 +105,7 @@ export function McpServer() {
   const regenerate = async () => {
     setBusy(true);
     try {
-      await ipc.regenerateMcpToken();
+      setToken(await ipc.regenerateMcpToken());
       setStatus(await ipc.mcpStatus());
       setRevealed(true);
     } finally {
@@ -107,7 +124,6 @@ export function McpServer() {
   };
 
   const url = `http://127.0.0.1:${status.boundPort ?? status.port}/mcp`;
-  const token = status.token ?? "";
   const cliCommand = `claude mcp add --transport http lattice ${url} --header "Authorization: Bearer ${token}"`;
   const jsonConfig = JSON.stringify(
     {
@@ -193,9 +209,10 @@ export function McpServer() {
 
       <section className="min-w-0 rounded-lg border border-border bg-surface p-5">
         <h2 className="text-sm font-semibold">Access token</h2>
-        <p className="mt-0.5 text-xs text-muted">
+        <p className="mt-0.5 max-w-lg text-xs text-muted">
           Stored in your OS keychain. Any process on this machine can reach the
           port, so the token is what keeps them out — treat it like a password.
+          Showing it unlocks the keychain, so it stays hidden until you ask.
         </p>
         {token ? (
           <>
@@ -233,9 +250,21 @@ export function McpServer() {
             </p>
           </>
         ) : (
-          <p className="mt-4 rounded-md border border-border bg-surface-raised px-3 py-2 text-xs text-muted">
-            A token is created the first time you enable the server.
-          </p>
+          <div className="mt-4 flex items-center gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={unlocking}
+              onClick={() => void revealToken()}
+            >
+              {unlocking && <Spinner className="mr-1.5 h-3.5 w-3.5" />}
+              <Eye className="mr-1.5 h-3.5 w-3.5" />
+              Show token and connection details
+            </Button>
+            <span className="text-[11px] text-muted">
+              Your OS may ask for your password.
+            </span>
+          </div>
         )}
       </section>
 

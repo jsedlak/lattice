@@ -33,6 +33,16 @@ pub fn set_mcp_config<R: Runtime>(app: AppHandle<R>, enabled: bool, port: u16) -
     Ok(mcp::status(&app, error))
 }
 
+/// Returns the bearer token, creating one if none exists.
+///
+/// Separate from `mcp_status` on purpose: this unlocks the secret store, which
+/// on macOS can be a password prompt. Opening Settings → MCP must cost nothing,
+/// so only an explicit "show connection details" click lands here.
+#[tauri::command]
+pub fn mcp_token<R: Runtime>(app: AppHandle<R>) -> CmdResult<String> {
+    mcp::ensure_token(&app)
+}
+
 /// Issues a new bearer token, invalidating the old one. Restarts the listener so
 /// the change takes effect without relaunching the app.
 #[tauri::command]
