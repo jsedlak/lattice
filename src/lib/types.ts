@@ -209,5 +209,37 @@ export const DEFAULT_SETTINGS: AppSettings = {
   editor: "monaco",
 };
 
-/** Keychain entry names (per role). */
-export type SecretName = "chat-api-key" | "embedding-api-key";
+/** Secret names within the store. All of them live in a single OS keychain
+ *  entry, so unlocking one unlocks all — one password prompt per app run. */
+export type SecretName = "chat-api-key" | "embedding-api-key" | "mcp-token";
+
+/**
+ * settings.json as the Rust core stores it: the frontend's AppSettings plus
+ * Rust-owned keys it must not clobber (set_settings shallow-merges).
+ * `secretsPresent` mirrors *which* secrets exist so the UI can render badges
+ * and readiness without unlocking the keychain.
+ */
+export type StoredSettings = AppSettings & { secretsPresent?: SecretName[] };
+
+// ── MCP server ───────────────────────────────────────────────────────────────
+
+/**
+ * The in-app MCP server, which exposes the graph to external agents over
+ * loopback HTTP. Config lives under the `mcp` key of settings.json and is
+ * Rust-owned — it is read and written through the mcp_* commands, never through
+ * the AppSettings blob, so saving settings can't clobber it.
+ */
+export interface McpStatus {
+  enabled: boolean;
+  /** Configured port — what the next start will try to bind. */
+  port: number;
+  running: boolean;
+  /** The port currently bound; null when not running. */
+  boundPort: number | null;
+  /** Why the last start attempt failed (port in use, permissions…). */
+  error: string | null;
+  /** The workspace agents will see — the server serves only the open one. */
+  workspacePath: string;
+}
+
+export const DEFAULT_MCP_PORT = 4319;

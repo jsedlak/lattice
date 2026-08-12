@@ -5,6 +5,7 @@ import { FolderOpen, Monitor, Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 
 import { EndpointForm, type TestState } from "@/components/settings/EndpointForm";
+import { McpServer } from "@/components/settings/McpServer";
 import { Button, Input, Spinner, useConfirm } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import * as ipc from "@/lib/ipc";
@@ -17,7 +18,12 @@ import type {
 } from "@/lib/types";
 import { DEFAULT_SETTINGS, LOCAL_EMBEDDING } from "@/lib/types";
 import { languageModelFor } from "@/lib/ai/providers";
-import { invalidateAiSettings, loadSettings, saveSettings } from "@/lib/ai/settings";
+import {
+  invalidateAiSettings,
+  loadSettings,
+  saveSettings,
+  storedSecrets,
+} from "@/lib/ai/settings";
 import { enqueueIngest, reingestAll } from "@/lib/ingest/pipeline";
 
 const EDITOR_OPTIONS: { value: EditorChoice; label: string; hint: string }[] = [
@@ -36,10 +42,11 @@ const STORAGE_OPTIONS: { value: StorageMode; label: string; hint: string }[] = [
   { value: "files", label: "Markdown files", hint: "notes are .md files under notes/ — editable with any tool" },
 ];
 
-type Tab = "general" | "ai";
+type Tab = "general" | "ai" | "mcp";
 const TABS: { id: Tab; label: string }[] = [
   { id: "general", label: "General" },
   { id: "ai", label: "AI" },
+  { id: "mcp", label: "MCP" },
 ];
 
 export function SettingsScreen() {
@@ -64,12 +71,13 @@ export function SettingsScreen() {
       const s = await loadSettings();
       setSettings(s);
       setInitialEmbedding(`${s.embedding.kind}:${s.embedding.model}:${s.embedding.dimensions}`);
-      const [ck, ek, ws] = await Promise.all([
-        ipc.getSecret("chat-api-key"),
-        ipc.getSecret("embedding-api-key"),
-        ipc.getWorkspaceInfo(),
-      ]);
-      setStored({ chat: ck !== null, embedding: ek !== null });
+      // Presence only — reading the key *values* here would unlock the OS
+      // keychain (a password prompt) just for rendering two badges.
+      const [present, ws] = await Promise.all([storedSecrets(), ipc.getWorkspaceInfo()]);
+      setStored({
+        chat: present.has("chat-api-key"),
+        embedding: present.has("embedding-api-key"),
+      });
       setWorkspace(ws);
     })();
   }, []);
@@ -428,13 +436,23 @@ export function SettingsScreen() {
           </div>
         )}
 
-        <div className="mt-6 flex items-center gap-3">
-          <Button onClick={() => void save()} disabled={saving}>
-            {saving ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : null}
-            Save settings
-          </Button>
-          {savedAt && <span className="text-xs text-graph-tag animate-fade-in">Saved.</span>}
-        </div>
+        {tab === "mcp" && (
+          <div className="mt-6">
+            <McpServer />
+          </div>
+        )}
+
+        {/* The MCP tab applies its own changes to a live listener — a Save
+            button there would imply the toggle hadn't taken effect yet. */}
+        {tab !== "mcp" && (
+          <div className="mt-6 flex items-center gap-3">
+            <Button onClick={() => void save()} disabled={saving}>
+              {saving ? <Spinner className="mr-1.5 h-3.5 w-3.5" /> : null}
+              Save settings
+            </Button>
+            {savedAt && <span className="text-xs text-graph-tag animate-fade-in">Saved.</span>}
+          </div>
+        )}
       </div>
     </div>
   );

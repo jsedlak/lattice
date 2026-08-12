@@ -2,6 +2,7 @@ pub mod chat;
 pub mod docs;
 pub mod embedding;
 pub mod graph;
+pub mod mcp;
 pub mod settings;
 pub mod workspace;
 

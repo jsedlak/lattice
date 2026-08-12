@@ -372,6 +372,83 @@ pub fn get_neighbors(state: State<AppState>, node_id: String) -> CmdResult<Optio
     Ok(Some(Neighborhood { center, neighbors }))
 }
 
+/// The ego network around a node out to `depth` hops (undirected), with every
+/// edge whose endpoints both landed in the set. `get_neighbors` is the 1-hop
+/// case and `get_graph` is the whole thing; this is the middle ground an agent
+/// needs to see a neighborhood without N round-trips.
+#[tauri::command]
+pub fn get_subgraph(
+    state: State<AppState>,
+    node_id: String,
+    depth: Option<u32>,
+) -> CmdResult<GraphData> {
+    let depth = depth.unwrap_or(2).clamp(1, 4) as usize;
+    let conn = state.db.lock();
+    if load_node(&conn, &node_id).map_err(err)?.is_none() {
+        return Ok(GraphData { nodes: vec![], edges: vec![] });
+    }
+
+    // Same shape as traverse(): the whole edge list is small at single-user scale.
+    let mut stmt = conn.prepare("SELECT source_id, target_id FROM edge").map_err(err)?;
+    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+    for row in stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(err)?
+    {
+        let (a, b) = row.map_err(err)?;
+        adjacency.entry(a.clone()).or_default().push(b.clone());
+        adjacency.entry(b).or_default().push(a);
+    }
+
+    let mut included: HashSet<String> = HashSet::from([node_id.clone()]);
+    let mut frontier = vec![node_id];
+    for _ in 0..depth {
+        let mut next = Vec::new();
+        for current in &frontier {
+            for neighbor in adjacency.get(current).into_iter().flatten() {
+                if included.insert(neighbor.clone()) {
+                    next.push(neighbor.clone());
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
+
+    let mut nodes = Vec::with_capacity(included.len());
+    for id in &included {
+        if let Some(n) = load_node(&conn, id).map_err(err)? {
+            nodes.push(n);
+        }
+    }
+
+    let mut edge_stmt = conn
+        .prepare("SELECT id, source_id, target_id, relation, origin, label, weight FROM edge")
+        .map_err(err)?;
+    let edges = edge_stmt
+        .query_map([], |r| {
+            Ok(GraphEdge {
+                id: r.get(0)?,
+                source_id: r.get(1)?,
+                target_id: r.get(2)?,
+                relation: r.get(3)?,
+                origin: r.get(4)?,
+                label: r.get(5)?,
+                weight: r.get(6)?,
+            })
+        })
+        .map_err(err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(err)?
+        .into_iter()
+        .filter(|e| included.contains(&e.source_id) && included.contains(&e.target_id))
+        .collect();
+
+    Ok(GraphData { nodes, edges })
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraversalResult {

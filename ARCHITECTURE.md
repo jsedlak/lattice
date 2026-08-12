@@ -23,6 +23,7 @@ layers with a sharp boundary:
 │  src-tauri/src/commands/  docs · graph · chat · settings · workspace   │
 │  src-tauri/src/db.rs      schema, migrations, vec0 tables              │
 │  src-tauri/src/workspace.rs  .lattice, path helpers, sanitization      │
+│  src-tauri/src/mcp/       MCP server — loopback HTTP, graph tools      │
 └──────────────┬───────────────────────────┬─────────────────────────────┘
         SQLite (lattice.db)         workspace filesystem
         WAL, sqlite-vec             files/ (uploads) · notes/ (markdown)
@@ -46,6 +47,7 @@ boundary as strings (`CmdResult<T> = Result<T, String>`).
 | `settings.rs` | settings.json (merge-write), keychain secrets |
 | `workspace.rs` | workspace info/switching, files-mode sync, storage-mode migration |
 | `embedding.rs` | built-in local embedding: model download, on-device inference |
+| `mcp.rs` | MCP server enable/port, bearer token, embedding-path check |
 
 ## Data model
 
@@ -230,6 +232,55 @@ and rendered as links back into the editor/graph.
 Provider HTTP goes through `tauri-plugin-http`'s fetch (Rust reqwest under the
 hood), so calls are CORS-free and work against any local or remote endpoint.
 
+## MCP server
+
+`src-tauri/src/mcp/` exposes the graph to external agents (Claude Code, Claude
+Desktop) so the knowledge base can ground reasoning outside the app. Off by
+default; Settings → MCP enables it, picks the port, and prints the client config.
+
+It lives **inside the app rather than in a stdio sidecar** for one reason: an
+`AppHandle` yields `app.state::<AppState>()`, which is the same `State<AppState>`
+the IPC layer passes, so the tools call the existing `#[tauri::command]`
+functions unchanged. No second query implementation, no second workspace
+resolution, no second db handle — `mcp/` is a protocol adapter over the surface
+the webview already uses. The costs of that choice: the app must be running, and
+only the currently-open workspace is served (a workspace switch restarts the app,
+and the server with it).
+
+- **Transport** (`server.rs`) — Streamable HTTP, stateless: one `POST /mcp`
+  answering `application/json`. SSE is only required for server-initiated
+  messages, which a query server never sends, so there are no sessions or event
+  ids. Batching is gone as of the `2025-06-18` revision and is refused.
+- **Security** — bound to `127.0.0.1` only, behind a bearer token in the OS
+  keychain (`mcp-token`). Two extra gates defeat DNS rebinding, where a page on
+  an attacker's domain resolves it to loopback: any request carrying an `Origin`
+  header is rejected outright (MCP clients aren't browsers and never send one),
+  as is any non-loopback `Host`. No CORS headers are ever emitted.
+- **Tools** (`tools.rs`) — `semanticSearch`, `searchNodes`, `getNeighbors`,
+  `traverse` keep the names and descriptions from `src/lib/ai/tools.ts` so
+  behavior matches the in-app assistant. `getSubgraph`, `getDocument`, and
+  `listDocuments` are additions an external agent needs and the assistant got
+  from the UI. Read-only. Results are capped (snippets truncated, subgraphs
+  capped at 200 nodes with `truncated: true`) so a hub tag can't dump the graph
+  into the caller's context.
+- **`instructions`** — returned by `initialize`, and load-bearing: the in-app
+  assistant learns the graph vocabulary (node types, `deterministic` vs `llm`
+  edge origins, folder-paths-as-tags) from its system prompt, and an MCP client
+  has no system prompt. Without it the tools read as generic search and the graph
+  never gets traversed.
+- **Resources** — every document as `lattice://document/{id}`, so notes can be
+  attached as context directly instead of through a tool call.
+- **Query embedding** — `semanticSearch` must embed its query with no webview in
+  the loop, so `embedding.rs` gained an OpenAI-compatible `/embeddings` client
+  alongside the on-device model. This narrows the "Rust never calls a model" rule
+  to **Rust owns text→vector, TypeScript owns text→text** — Rust already owned
+  that job for the local model. Settings → MCP has a Test button because this is
+  a different code path from the one the in-app assistant exercises.
+
+`mcp/` and `commands/mcp.rs` are generic over `R: Runtime` so the whole path —
+bind, JSON-RPC framing, tool dispatch, SQLite — is covered by tests against a
+mock app and a real socket rather than only by type-checking.
+
 ## Frontend structure
 
 - `src/screens/` — one component per route: Dashboard, Editor, Graph,
@@ -251,6 +302,17 @@ hood), so calls are CORS-free and work against any local or remote endpoint.
   including the files-mode export/sync roundtrip against a scratch workspace.
 - `./scripts/release.sh X.Y.Z` — bumps `tauri.conf.json`, `package.json`,
   `Cargo.toml`/lock; commits, tags `vX.Y.Z`, pushes.
+- **Icons diverge on macOS, deliberately.** macOS 26 (Tahoe) re-renders legacy
+  `.icns` icons into its own rounded shape, and artwork that draws its own
+  rounded rect on a transparent canvas gets composited onto a light plate and
+  inset — the installed app showed a grey border the dev build didn't, because
+  `tauri dev` runs an unbundled binary that never goes through that path. So
+  `icon.icns` is built from a **full-bleed** master (`icons/icon-macos.png`: no
+  transparency, no self-drawn corners) and Tahoe masks it directly. Windows and
+  Linux don't mask app icons, so `icon.ico` and the PNG sizes keep the original
+  rounded artwork with its speech-bubble tail. Regenerate with
+  `python3 scripts/make-macos-icns.py` (needs Pillow + `iconutil`; no full Xcode).
+  Accepted trade-off: macOS before 26 draws `.icns` as-is and shows a hard square.
 - `.github/workflows/release.yml` — on tag: verifies tag == app version,
   creates a draft GitHub release with a generated changelog, then builds and
   uploads installers from a three-platform matrix (Ubuntu 22.04 for older
