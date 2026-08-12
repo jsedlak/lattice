@@ -135,6 +135,107 @@ pub fn load(models_dir: &Path) -> Result<Embedder, String> {
     Ok(Embedder { model, tokenizer, device })
 }
 
+// ── Remote embedding ─────────────────────────────────────────────────────────
+//
+// The architectural rule is "Rust persists, TypeScript orchestrates", with the
+// corollary that Rust never calls a model. Embedding is the deliberate
+// exception, narrowed to: **Rust owns text→vector, TypeScript owns text→text.**
+// Rust already owned that responsibility for the on-device model above; the MCP
+// server needs to embed a search query with no webview in the loop, and routing
+// it back through the frontend would fail whenever no window is open.
+
+/// An embedding endpoint as configured in settings.json (`embedding` key).
+pub struct RemoteConfig {
+    pub kind: String,
+    pub model: String,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl RemoteConfig {
+    fn resolved_base(&self) -> Result<&str, String> {
+        match self.kind.as_str() {
+            "openai" => Ok("https://api.openai.com/v1"),
+            "anthropic" => Ok("https://api.anthropic.com/v1"),
+            // The Gateway's OpenAI-compatible surface. The TS path uses
+            // @ai-sdk/gateway's own protocol instead, so this URL is the one
+            // piece here not already exercised by the app — Settings → MCP has
+            // a Test button that round-trips it.
+            "gateway" => Ok("https://ai-gateway.vercel.sh/v1"),
+            "openai-compatible" => self
+                .base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "openai-compatible embedding endpoint has no base URL".to_string()),
+            other => Err(format!("unsupported embedding endpoint kind: {other}")),
+        }
+    }
+}
+
+/// Embeds texts through an OpenAI-compatible `/embeddings` endpoint.
+/// Blocking (ureq) — call it from a blocking context.
+pub fn embed_remote(config: &RemoteConfig, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+    if texts.is_empty() {
+        return Ok(vec![]);
+    }
+    let url = format!("{}/embeddings", config.resolved_base()?.trim_end_matches('/'));
+    let body = serde_json::json!({ "model": config.model, "input": texts });
+
+    // Serialized by hand rather than via send_json: ureq's json support is
+    // behind a feature this crate doesn't enable, and the body is trivial.
+    let payload = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+    let mut req = ureq::post(&url).header("content-type", "application/json");
+    if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
+        req = req.header("authorization", &format!("Bearer {key}"));
+    }
+
+    let mut resp = req.send(payload.as_str()).map_err(|e| match e {
+        ureq::Error::StatusCode(code) => format!(
+            "embedding endpoint returned HTTP {code} ({url}) — check the model name and API key"
+        ),
+        other => format!("embedding request failed: {other}"),
+    })?;
+    let mut raw = String::new();
+    resp.body_mut()
+        .as_reader()
+        .read_to_string(&mut raw)
+        .map_err(|e| format!("could not read embedding response: {e}"))?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("embedding response was not JSON: {e}"))?;
+
+    let data = parsed
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| match parsed.get("error") {
+            Some(e) => format!("embedding endpoint error: {e}"),
+            None => "embedding response had no data array".to_string(),
+        })?;
+
+    // Sort by the reported index: the spec allows out-of-order data.
+    let mut rows: Vec<(usize, Vec<f32>)> = data
+        .iter()
+        .enumerate()
+        .map(|(fallback, item)| {
+            let index = item.get("index").and_then(|i| i.as_u64()).map_or(fallback, |i| i as usize);
+            let vector = item
+                .get("embedding")
+                .and_then(|e| e.as_array())
+                .ok_or_else(|| "embedding item had no vector".to_string())?
+                .iter()
+                .map(|v| v.as_f64().map(|f| f as f32).ok_or_else(|| "non-numeric embedding value".to_string()))
+                .collect::<Result<Vec<f32>, String>>()?;
+            Ok((index, vector))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    rows.sort_by_key(|(i, _)| *i);
+
+    if rows.len() != texts.len() {
+        return Err(format!("expected {} embeddings, got {}", texts.len(), rows.len()));
+    }
+    Ok(rows.into_iter().map(|(_, v)| v).collect())
+}
+
 impl Embedder {
     pub fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         let mut out = Vec::with_capacity(texts.len());

@@ -1,6 +1,7 @@
 mod commands;
 mod db;
 mod embedding;
+mod mcp;
 mod workspace;
 
 use std::fs;
@@ -26,6 +27,8 @@ pub struct AppState {
     pub models_dir: PathBuf,
     /// Lazily-loaded local embedding session.
     pub embedder: Mutex<Option<embedding::Embedder>>,
+    /// The MCP server, when it is listening. Holds its shutdown trigger.
+    pub mcp: Mutex<Option<mcp::McpHandle>>,
 }
 
 impl AppState {
@@ -117,7 +120,10 @@ pub fn run() {
                 storage_mode: Mutex::new(cfg.storage),
                 models_dir,
                 embedder: Mutex::new(None),
+                mcp: Mutex::new(None),
             });
+            // After manage(): the server resolves its config through AppState.
+            mcp::start_if_enabled(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -147,6 +153,7 @@ pub fn run() {
             commands::graph::find_entity_by_name,
             commands::graph::search_nodes,
             commands::graph::get_neighbors,
+            commands::graph::get_subgraph,
             commands::graph::traverse,
             commands::graph::replace_chunks,
             commands::graph::cosine_search_chunks,
@@ -173,6 +180,11 @@ pub fn run() {
             commands::embedding::local_embedding_status,
             commands::embedding::download_local_embedding_model,
             commands::embedding::local_embed_texts,
+            // MCP server
+            commands::mcp::mcp_status,
+            commands::mcp::set_mcp_config,
+            commands::mcp::regenerate_mcp_token,
+            commands::mcp::test_mcp_embedding,
             // settings & secrets
             commands::settings::get_settings,
             commands::settings::set_settings,

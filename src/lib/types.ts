@@ -211,3 +211,27 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 /** Keychain entry names (per role). */
 export type SecretName = "chat-api-key" | "embedding-api-key";
+
+// ── MCP server ───────────────────────────────────────────────────────────────
+
+/**
+ * The in-app MCP server, which exposes the graph to external agents over
+ * loopback HTTP. Config lives under the `mcp` key of settings.json and is
+ * Rust-owned — it is read and written through the mcp_* commands, never through
+ * the AppSettings blob, so saving settings can't clobber it.
+ */
+export interface McpStatus {
+  enabled: boolean;
+  /** Configured port — what the next start will try to bind. */
+  port: number;
+  running: boolean;
+  /** The port currently bound; null when not running. */
+  boundPort: number | null;
+  token: string | null;
+  /** Why the last start attempt failed (port in use, permissions…). */
+  error: string | null;
+  /** The workspace agents will see — the server serves only the open one. */
+  workspacePath: string;
+}
+
+export const DEFAULT_MCP_PORT = 4319;

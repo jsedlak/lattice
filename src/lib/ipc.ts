@@ -22,6 +22,7 @@ import type {
   JobStatus,
   LocalEmbeddingInfo,
   JobStep,
+  McpStatus,
   MessageRow,
   Neighborhood,
   NodeType,
@@ -117,6 +118,10 @@ export const searchNodes = (q: string, nodeType?: NodeType) =>
 
 export const getNeighbors = (nodeId: string) =>
   invoke<Neighborhood | null>("get_neighbors", { nodeId });
+
+/** The ego network around a node out to `depth` hops, with the edges between. */
+export const getSubgraph = (nodeId: string, depth = 2) =>
+  invoke<GraphData>("get_subgraph", { nodeId, depth });
 
 export const traverse = (fromNodeId: string, toNodeId: string, maxHops = 3) =>
   invoke<TraversalResult>("traverse", { fromNodeId, toNodeId, maxHops });
@@ -240,6 +245,20 @@ export const downloadLocalEmbeddingModel = () =>
 /** On-device embedding — one vector (384 dims) per input text. */
 export const localEmbedTexts = (texts: string[]) =>
   invoke<number[][]>("local_embed_texts", { texts });
+
+// ── MCP server ───────────────────────────────────────────────────────────────
+
+export const mcpStatus = () => invoke<McpStatus>("mcp_status");
+
+/** Persists enabled/port and applies it now; bind failures come back in `error`. */
+export const setMcpConfig = (enabled: boolean, port: number) =>
+  invoke<McpStatus>("set_mcp_config", { enabled, port });
+
+/** Issues a new bearer token and restarts the listener. Invalidates the old one. */
+export const regenerateMcpToken = () => invoke<string>("regenerate_mcp_token");
+
+/** Embeds a probe string through the Rust path MCP semantic search uses. */
+export const testMcpEmbedding = () => invoke<number>("test_mcp_embedding");
 
 // ── Settings & secrets ───────────────────────────────────────────────────────
 
