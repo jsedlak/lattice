@@ -128,6 +128,10 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # MUST match cache-warm.yml — see the note there. The default key
+          # embeds the job id, which is what kept this job from ever restoring
+          # the warm cache.
+          shared-key: tauri-release
           # Tag-scoped caches can never be restored by later tags — only
           # main's caches can (cache-warm.yml maintains those). Don't waste
           # cache storage saving from release runs.
