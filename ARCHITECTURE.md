@@ -302,6 +302,17 @@ mock app and a real socket rather than only by type-checking.
   including the files-mode export/sync roundtrip against a scratch workspace.
 - `./scripts/release.sh X.Y.Z` — bumps `tauri.conf.json`, `package.json`,
   `Cargo.toml`/lock; commits, tags `vX.Y.Z`, pushes.
+- **Icons diverge on macOS, deliberately.** macOS 26 (Tahoe) re-renders legacy
+  `.icns` icons into its own rounded shape, and artwork that draws its own
+  rounded rect on a transparent canvas gets composited onto a light plate and
+  inset — the installed app showed a grey border the dev build didn't, because
+  `tauri dev` runs an unbundled binary that never goes through that path. So
+  `icon.icns` is built from a **full-bleed** master (`icons/icon-macos.png`: no
+  transparency, no self-drawn corners) and Tahoe masks it directly. Windows and
+  Linux don't mask app icons, so `icon.ico` and the PNG sizes keep the original
+  rounded artwork with its speech-bubble tail. Regenerate with
+  `python3 scripts/make-macos-icns.py` (needs Pillow + `iconutil`; no full Xcode).
+  Accepted trade-off: macOS before 26 draws `.icns` as-is and shows a hard square.
 - `.github/workflows/release.yml` — on tag: verifies tag == app version,
   creates a draft GitHub release with a generated changelog, then builds and
   uploads installers from a three-platform matrix (Ubuntu 22.04 for older
