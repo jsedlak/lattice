@@ -34,6 +34,7 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
     opts: { title: "" },
   });
   const resolveRef = React.useRef<((value: boolean) => void) | null>(null);
+  const actionRef = React.useRef<HTMLButtonElement>(null);
 
   const confirm = React.useCallback(
     (opts: ConfirmOptions) =>
@@ -54,7 +55,15 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
     <ConfirmContext.Provider value={confirm}>
       {children}
       <AlertDialog open={state.open} onOpenChange={(open) => !open && settle(false)}>
-        <AlertDialogContent>
+        <AlertDialogContent
+          // Radix focuses Cancel by default, which makes Enter dismiss the
+          // dialog. Focus the confirm button instead so Enter accepts (Escape
+          // still cancels) — preventDefault stops Radix's own focus handler.
+          onOpenAutoFocus={(e) => {
+            e.preventDefault();
+            actionRef.current?.focus();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>{state.opts.title}</AlertDialogTitle>
             {state.opts.description && (
@@ -66,6 +75,7 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
               {state.opts.cancelLabel ?? "Cancel"}
             </AlertDialogCancel>
             <AlertDialogAction
+              ref={actionRef}
               destructive={state.opts.destructive}
               onClick={() => settle(true)}
             >

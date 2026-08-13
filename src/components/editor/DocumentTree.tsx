@@ -525,15 +525,12 @@ export function DocumentTree({
                 if (
                   await confirm({
                     title: "Delete folder?",
-                    description: `"${folder.name}" will be deleted. Its notes and subfolders move up a level.`,
+                    description: `"${folder.name}" and everything inside it — notes, files and subfolders — will be permanently deleted.`,
                     confirmLabel: "Delete folder",
                     destructive: true,
                   })
                 ) {
-                  const affected = docsUnder(folder.id);
                   await deleteFolder(folder.id);
-                  // Notes move up a level, so they lose this path segment.
-                  await rebuildFolderContext(affected);
                   onRefresh();
                 }
               }}

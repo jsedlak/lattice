@@ -488,74 +488,58 @@ pub fn rename_folder(state: State<AppState>, id: String, name: String) -> CmdRes
     Ok(())
 }
 
+/// `root` plus every folder beneath it, parents before children. folder.parent_id
+/// has no FK, so a subtree delete has to walk the tree itself.
+fn folder_subtree_ids(conn: &Connection, root: &str) -> CmdResult<Vec<String>> {
+    let mut ids = vec![root.to_string()];
+    let mut i = 0;
+    while i < ids.len() {
+        let children: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT id FROM folder WHERE parent_id = ?1")
+                .map_err(err)?;
+            let rows = stmt.query_map([&ids[i]], |r| r.get(0)).map_err(err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(err)?
+        };
+        ids.extend(children);
+        i += 1;
+    }
+    Ok(ids)
+}
+
+/// Deletes the folder and everything inside it — notes, uploads and subfolders,
+/// all the way down.
 #[tauri::command]
 pub fn delete_folder(state: State<AppState>, id: String) -> CmdResult<()> {
     let conn = state.db.lock();
-    // Files mode: mirror the fallback-to-root semantics on disk before the
-    // rows change (folder_rel_dir walks the current parent chain).
+    // Files mode: the directory *is* the folder, so one recursive remove takes
+    // the whole subtree off disk. Do it before the rows change — folder_rel_dir
+    // walks the parent chain that's about to disappear. Anything the user
+    // parked in there by hand goes too; it's content of the deleted folder.
     if state.files_mode() {
-        let ws = &state.workspace_dir;
         let folder_rel = workspace::folder_rel_dir(&conn, Some(&id))?;
-        let notes_root = ws.join("notes");
-        fs::create_dir_all(&notes_root).map_err(err)?;
-
-        let docs: Vec<(String, String, Option<String>)> = {
-            let mut stmt = conn
-                .prepare("SELECT id, title, file_path FROM document WHERE folder_id = ?1 AND kind = 'note'")
-                .map_err(err)?;
-            let rows = stmt
-                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                .map_err(err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(err)?
-        };
-        for (doc_id, title, rel) in docs {
-            let Some(rel) = rel else { continue };
-            let cur_abs = ws.join(&rel);
-            let (stem, new_rel) = workspace::place_note(&conn, ws, None, &title, Some(&cur_abs))?;
-            fs::rename(&cur_abs, ws.join(&new_rel)).map_err(err)?;
-            conn.execute(
-                "UPDATE document SET title = ?2, file_path = ?3 WHERE id = ?1",
-                params![doc_id, stem, new_rel],
-            )
-            .map_err(err)?;
+        match fs::remove_dir_all(state.workspace_dir.join(&folder_rel)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(err(e)),
+            _ => {}
         }
-
-        let children: Vec<(String, String)> = {
-            let mut stmt = conn
-                .prepare("SELECT id, name FROM folder WHERE parent_id = ?1")
-                .map_err(err)?;
-            let rows = stmt
-                .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))
-                .map_err(err)?;
-            rows.collect::<Result<Vec<_>, _>>().map_err(err)?
-        };
-        for (child_id, name) in children {
-            let old_rel = workspace::folder_rel_dir(&conn, Some(&child_id))?;
-            let unique =
-                workspace::unique_name(&notes_root, &workspace::sanitize_stem(&name), false, None);
-            let new_rel = Path::new("notes").join(&unique);
-            fs::rename(ws.join(&old_rel), ws.join(&new_rel)).map_err(err)?;
-            workspace::rewrite_path_prefix(
-                &conn,
-                &workspace::rel_to_string(&old_rel),
-                &workspace::rel_to_string(&new_rel),
-            )?;
-            if unique != name {
-                conn.execute("UPDATE folder SET name = ?2 WHERE id = ?1", params![child_id, unique])
-                    .map_err(err)?;
-            }
-        }
-
-        // Only removes an empty dir — stray user files keep it (and stay) put.
-        let _ = fs::remove_dir(ws.join(&folder_rel));
     }
-    // Documents fall back to root; child folders are re-rooted (app-managed tree).
-    conn.execute("UPDATE document SET folder_id = NULL WHERE folder_id = ?1", [&id])
-        .map_err(err)?;
-    conn.execute("UPDATE folder SET parent_id = NULL WHERE parent_id = ?1", [&id])
-        .map_err(err)?;
-    conn.execute("DELETE FROM folder WHERE id = ?1", [&id]).map_err(err)?;
-    Ok(())
+
+    let tx = conn.unchecked_transaction().map_err(err)?;
+    for folder_id in folder_subtree_ids(&tx, &id)? {
+        let doc_ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare("SELECT id FROM document WHERE folder_id = ?1")
+                .map_err(err)?;
+            let rows = stmt.query_map([&folder_id], |r| r.get(0)).map_err(err)?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(err)?
+        };
+        // Takes the chunks, vectors, graph nodes/edges and upload files with it.
+        for doc_id in doc_ids {
+            delete_document_row(&tx, &state.workspace_dir, &doc_id)?;
+        }
+        tx.execute("DELETE FROM folder WHERE id = ?1", [&folder_id]).map_err(err)?;
+    }
+    tx.commit().map_err(err)
 }
 
 // ── Uploads ──────────────────────────────────────────────────────────────────
