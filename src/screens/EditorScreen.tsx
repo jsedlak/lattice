@@ -154,8 +154,15 @@ export function EditorScreen() {
     );
   }
 
+  // An explicit ?tab= wins: opening an upload from its folder in the tree must
+  // not flip the sidebar to the Uploads list. Without one, an upload still
+  // implies the Uploads tab (e.g. arriving from a graph node or a citation).
   const tab: EditorTab =
-    tabParam === "uploads" || selected?.kind === "upload" ? "uploads" : "documents";
+    tabParam === "uploads" || tabParam === "documents"
+      ? tabParam
+      : selected?.kind === "upload"
+        ? "uploads"
+        : "documents";
 
   return (
     <div ref={rowRef} className="flex h-full">

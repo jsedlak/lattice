@@ -4,6 +4,8 @@ import {
   FileText,
   Folder as FolderIcon,
   FolderPlus,
+  Paperclip,
+  Upload,
 } from "lucide-react";
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
@@ -33,6 +35,10 @@ import {
   updateDocument,
 } from "@/lib/ipc";
 import type { Doc, Folder } from "@/lib/types";
+import { describeImportErrors, importUploads, pickUploadPaths } from "@/lib/uploads";
+import { useFileDrop } from "@/lib/use-file-drop";
+
+import { IngestBadge } from "./IngestBadge";
 
 const moveDocument = (documentId: string, folderId: string | null) =>
   updateDocument(documentId, { folderId });
@@ -50,6 +56,9 @@ type DropSpot =
   | { kind: "folder"; id: string; pos: "before" | "after" | "into" }
   | { kind: "root" }
   | null;
+
+/** Where an OS file drag would land — `null` folderId means the tree root. */
+type FileDropTarget = { folderId: string | null };
 
 /** Pixels of movement before a mousedown becomes a drag instead of a click. */
 const DRAG_THRESHOLD = 5;
@@ -83,6 +92,11 @@ export function DocumentTree({
     () => new Set(folders.map((f) => f.id)),
   );
   const [renaming, setRenaming] = React.useState<RenameRequest | null>(null);
+  // Files an import rejected (unsupported type, unreadable) — shown above the tree.
+  const [importError, setImportError] = React.useState<string | null>(null);
+  // Folder an OS file-drag is hovering; null while no drag is over the tree.
+  const [fileDrop, setFileDrop] = React.useState<FileDropTarget | null>(null);
+  const containerRef = React.useRef<HTMLDivElement>(null);
   const [drag, setDrag] = React.useState<DragPayload | null>(null);
   const [drop, setDrop] = React.useState<DropSpot>(null);
   // mousedown that may become a drag once the pointer moves past the threshold.
@@ -134,6 +148,43 @@ export function DocumentTree({
     setRenaming({ kind: "folder", id: folder.id });
     onRefresh();
   }
+
+  /** Copies files into `folderId` as uploads. Shared by the context-menu
+   *  picker and the OS drag & drop handler. */
+  const importInto = React.useCallback(
+    async (paths: string[], folderId: string | null) => {
+      if (paths.length === 0) return;
+      const { errors } = await importUploads(paths, folderId);
+      setImportError(errors.length > 0 ? describeImportErrors(errors) : null);
+      if (folderId) setExpanded((p) => new Set(p).add(folderId));
+      onRefresh();
+    },
+    [onRefresh],
+  );
+
+  async function uploadInto(folderId: string | null) {
+    await importInto(await pickUploadPaths(), folderId);
+  }
+
+  /** Folder under the cursor, or null when the pointer is outside the tree. */
+  function fileDropTarget(x: number, y: number): FileDropTarget | null {
+    const root = containerRef.current;
+    if (!root) return null;
+    const el = document.elementFromPoint(x, y);
+    if (!el || !root.contains(el)) return null;
+    // Folder wrappers nest, so the innermost match is the folder you're in.
+    return { folderId: el.closest("[data-folder-id]")?.getAttribute("data-folder-id") ?? null };
+  }
+
+  // Files dragged in from the OS land in whichever folder they're dropped on.
+  useFileDrop((e) => {
+    if (e.type === "leave") return setFileDrop(null);
+    const target = fileDropTarget(e.x, e.y);
+    if (e.type === "over") return setFileDrop(target);
+    setFileDrop(null);
+    if (target) void importInto(e.paths, target.folderId);
+  });
+
   async function newNoteIn(folderId: string | null) {
     const document = await createNote("Untitled note", "", folderId);
     if (folderId) setExpanded((p) => new Set(p).add(folderId));
@@ -339,6 +390,7 @@ export function DocumentTree({
   ];
 
   function DocRow({ doc, depth }: { doc: Doc; depth: number }) {
+    const isUpload = doc.kind === "upload";
     const isRenaming = renaming?.kind === "doc" && renaming.id === doc.id;
     const isDragSource = drag?.kind === "doc" && drag.id === doc.id;
     const hover = drop?.kind === "doc" && drop.id === doc.id ? drop.pos : null;
@@ -368,7 +420,13 @@ export function DocumentTree({
             style={{ paddingLeft: depth * 14 + 8 }}
           >
             {hover && <DropLine pos={hover} />}
-            <FileText className="h-3.5 w-3.5 shrink-0 text-faint" />
+            {/* Uploads live in the tree as a link to the file itself — the
+                paperclip is what separates them from notes at a glance. */}
+            {isUpload ? (
+              <Paperclip className="h-3.5 w-3.5 shrink-0 text-faint" />
+            ) : (
+              <FileText className="h-3.5 w-3.5 shrink-0 text-faint" />
+            )}
             {isRenaming ? (
               <InlineRename
                 initial={doc.title}
@@ -380,16 +438,21 @@ export function DocumentTree({
                 onCancel={() => setRenaming(null)}
               />
             ) : (
-              <button
-                type="button"
-                className="flex-1 truncate text-left"
-                onClick={() => {
-                  if (suppressClick.current) return;
-                  navigate(`/editor/${doc.id}`);
-                }}
-              >
-                {doc.title}
-              </button>
+              <>
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 truncate text-left"
+                  onClick={() => {
+                    if (suppressClick.current) return;
+                    // Explicit tab: opening an upload from the tree shouldn't
+                    // swap the sidebar out from under you.
+                    navigate(`/editor/${doc.id}?tab=documents`);
+                  }}
+                >
+                  {doc.title}
+                </button>
+                {isUpload && <IngestBadge status={doc.ingestStatus} className="shrink-0" />}
+              </>
             )}
           </div>
         </ContextMenuTrigger>
@@ -421,8 +484,10 @@ export function DocumentTree({
             onSelect={async () => {
               if (
                 await confirm({
-                  title: "Delete note?",
-                  description: `"${doc.title}" will be permanently deleted.`,
+                  title: isUpload ? "Delete file?" : "Delete note?",
+                  description: isUpload
+                    ? `"${doc.title}" and its extracted graph data will be permanently deleted.`
+                    : `"${doc.title}" will be permanently deleted.`,
                   confirmLabel: "Delete",
                   destructive: true,
                 })
@@ -446,9 +511,12 @@ export function DocumentTree({
     const childFolders = foldersByParent.get(folder.id) ?? [];
     const childDocs = docsByFolder.get(folder.id) ?? [];
     const hover = drop?.kind === "folder" && drop.id === folder.id ? drop.pos : null;
+    const fileHover = fileDrop?.folderId === folder.id;
 
     return (
-      <div>
+      // The wrapper spans the folder's whole subtree, so an OS file drag
+      // anywhere inside it (child row, blank space) resolves to this folder.
+      <div data-folder-id={folder.id}>
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div
@@ -470,7 +538,7 @@ export function DocumentTree({
               }}
               className={cn(
                 "relative flex items-center gap-1 rounded-md py-1.5 pr-2  text-foreground hover:bg-surface-raised",
-                hover === "into" && "bg-accent/10 ring-1 ring-accent",
+                (hover === "into" || fileHover) && "bg-accent/10 ring-1 ring-accent",
                 isDragSource && "opacity-50",
               )}
               style={{ paddingLeft: depth * 14 + 4 }}
@@ -515,6 +583,9 @@ export function DocumentTree({
           <ContextMenuContent>
             <ContextMenuItem onSelect={() => newNoteIn(folder.id)}>New note</ContextMenuItem>
             <ContextMenuItem onSelect={() => newFolder(folder.id)}>New subfolder</ContextMenuItem>
+            <ContextMenuItem onSelect={() => void uploadInto(folder.id)}>
+              <Upload className="h-3.5 w-3.5" /> Upload files here
+            </ContextMenuItem>
             <ContextMenuItem onSelect={() => setRenaming({ kind: "folder", id: folder.id })}>
               Rename
             </ContextMenuItem>
@@ -561,12 +632,24 @@ export function DocumentTree({
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <div
-          className={cn("min-h-full", drop?.kind === "root" && "ring-1 ring-inset ring-accent")}
+          ref={containerRef}
+          className={cn(
+            "min-h-full",
+            (drop?.kind === "root" || fileDrop?.folderId === null) &&
+              "ring-1 ring-inset ring-accent",
+          )}
           onMouseMove={() => drag && setDropSpot({ kind: "root" })}
           onMouseLeave={() => drag && setDropSpot(null)}
         >
+          {importError && (
+            <p className="mb-1 whitespace-pre-wrap rounded-md bg-surface-raised px-2 py-1.5 text-xs text-graph-citation">
+              {importError}
+            </p>
+          )}
           {isEmpty ? (
-            <p className="px-2 py-3  text-faint">No notes yet. Right-click to add a folder.</p>
+            <p className="px-2 py-3  text-faint">
+              No notes yet. Right-click to add a folder, or drop files here.
+            </p>
           ) : (
             <>
               {rootFolders.map((f) => (
@@ -584,6 +667,9 @@ export function DocumentTree({
           <FolderPlus className="h-3.5 w-3.5" /> New folder
         </ContextMenuItem>
         <ContextMenuItem onSelect={() => newNoteIn(null)}>New note</ContextMenuItem>
+        <ContextMenuItem onSelect={() => void uploadInto(null)}>
+          <Upload className="h-3.5 w-3.5" /> Upload files
+        </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>
   );

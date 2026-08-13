@@ -1,9 +1,8 @@
-import { FileText, FolderPlus, Plus, Trash2 } from "lucide-react";
+import { FolderPlus, Paperclip, Plus, Trash2 } from "lucide-react";
 import * as React from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import {
-  Badge,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
@@ -12,10 +11,14 @@ import {
   useConfirm,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { folderPathLabel } from "@/lib/folder-context";
 import { createFolder, createNote, deleteDocument } from "@/lib/ipc";
-import type { Doc, Folder, IngestStatus } from "@/lib/types";
+import type { Doc, Folder } from "@/lib/types";
+import { describeImportErrors, importUploads } from "@/lib/uploads";
+import { useFileDrop } from "@/lib/use-file-drop";
 
 import { DocumentTree, type RenameRequest } from "./DocumentTree";
+import { IngestBadge } from "./IngestBadge";
 import { UploadButton } from "./UploadButton";
 
 export type EditorTab = "documents" | "uploads";
@@ -41,7 +44,9 @@ export function DocumentTabs({
   const [renameRequest, setRenameRequest] = React.useState<RenameRequest | null>(null);
   const onRenameRequestHandled = React.useCallback(() => setRenameRequest(null), []);
 
-  const notes = documents.filter((d) => d.kind === "note");
+  // The tree shows notes *and* uploads: an upload's folder is a logical
+  // placement (its bytes live in files/<id>/ either way), so the tree row is
+  // the link to it. Uploads tab still lists every upload, foldered or not.
   const uploads = documents.filter((d) => d.kind === "upload");
 
   async function onNewNote() {
@@ -76,7 +81,7 @@ export function DocumentTabs({
       <div className="flex-1 overflow-y-auto p-2">
         {tab === "documents" ? (
           <DocumentTree
-            documents={notes}
+            documents={documents}
             folders={folders}
             selectedId={selectedId}
             renameRequest={renameRequest}
@@ -84,12 +89,12 @@ export function DocumentTabs({
             onRefresh={onRefresh}
           />
         ) : (
-          <>
-            {uploads.map((d) => (
-              <UploadRow key={d.id} doc={d} active={d.id === selectedId} onRefresh={onRefresh} />
-            ))}
-            {uploads.length === 0 && <p className="px-2 py-3  text-faint">No uploads yet.</p>}
-          </>
+          <UploadList
+            uploads={uploads}
+            folders={folders}
+            selectedId={selectedId}
+            onRefresh={onRefresh}
+          />
         )}
       </div>
 
@@ -140,27 +145,82 @@ function TabLink({ active, to, label }: { active: boolean; to: string; label: st
   );
 }
 
-/** Row badge for in-flight / failed ingestion (ready is the quiet default). */
-const ROW_STATUS: Partial<
-  Record<IngestStatus, { label: string; concept: "entity" | "citation" }>
-> = {
-  queued: { label: "Queued", concept: "entity" },
-  processing: { label: "Processing…", concept: "entity" },
-  error: { label: "Error", concept: "citation" },
-};
+/**
+ * The Uploads pane: every upload, foldered or not. Files dropped here land at
+ * the root — the tree is where you drop to file something into a folder, but
+ * the drop shouldn't silently do nothing just because this tab is showing.
+ */
+function UploadList({
+  uploads,
+  folders,
+  selectedId,
+  onRefresh,
+}: {
+  uploads: Doc[];
+  folders: Folder[];
+  selectedId: string | null;
+  onRefresh: () => void;
+}) {
+  const containerRef = React.useRef<HTMLDivElement>(null);
+  const [hovering, setHovering] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const over = (x: number, y: number) => {
+    const el = document.elementFromPoint(x, y);
+    return Boolean(el && containerRef.current?.contains(el));
+  };
+
+  useFileDrop((e) => {
+    if (e.type === "leave") return setHovering(false);
+    if (e.type === "over") return setHovering(over(e.x, e.y));
+    setHovering(false);
+    if (!over(e.x, e.y)) return;
+    void importUploads(e.paths).then(({ errors }) => {
+      setError(errors.length > 0 ? describeImportErrors(errors) : null);
+      onRefresh();
+    });
+  });
+
+  return (
+    <div
+      ref={containerRef}
+      className={cn("min-h-full", hovering && "rounded-md ring-1 ring-inset ring-accent")}
+    >
+      {error && (
+        <p className="mb-1 whitespace-pre-wrap rounded-md bg-surface-raised px-2 py-1.5 text-xs text-graph-citation">
+          {error}
+        </p>
+      )}
+      {uploads.map((d) => (
+        <UploadRow
+          key={d.id}
+          doc={d}
+          folderPath={folderPathLabel(d.folderId, folders)}
+          active={d.id === selectedId}
+          onRefresh={onRefresh}
+        />
+      ))}
+      {uploads.length === 0 && (
+        <p className="px-2 py-3  text-faint">No uploads yet. Import or drop files here.</p>
+      )}
+    </div>
+  );
+}
 
 function UploadRow({
   doc,
+  folderPath,
   active,
   onRefresh,
 }: {
   doc: Doc;
+  /** Folder the upload is filed under, if any — where its tree row lives. */
+  folderPath: string | null;
   active: boolean;
   onRefresh: () => void;
 }) {
   const navigate = useNavigate();
   const confirm = useConfirm();
-  const status = ROW_STATUS[doc.ingestStatus];
 
   async function onDelete() {
     const ok = await confirm({
@@ -187,13 +247,12 @@ function UploadRow({
               : "text-muted hover:bg-surface-raised hover:text-foreground",
           )}
         >
-          <FileText className="h-3.5 w-3.5 shrink-0 text-faint" />
-          <span className="truncate">{doc.title}</span>
-          {status && (
-            <Badge concept={status.concept} className="ml-auto shrink-0">
-              {status.label}
-            </Badge>
-          )}
+          <Paperclip className="h-3.5 w-3.5 shrink-0 text-faint" />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate">{doc.title}</span>
+            {folderPath && <span className="block truncate text-xs text-faint">{folderPath}</span>}
+          </span>
+          <IngestBadge status={doc.ingestStatus} className="ml-auto shrink-0" />
         </Link>
       </ContextMenuTrigger>
       <ContextMenuContent>

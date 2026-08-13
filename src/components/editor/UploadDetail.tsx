@@ -8,6 +8,8 @@ import { fileSize, fileTypeLabel, relativeTime } from "@/lib/format";
 import { readUploadBytes } from "@/lib/ipc";
 import type { Doc, IngestStatus } from "@/lib/types";
 
+import { MarkdownPreview } from "./MarkdownPreview";
+
 const STATUS_LABEL: Record<
   IngestStatus,
   { label: string; concept: "tag" | "entity" | "citation" | "neutral" }
@@ -31,35 +33,6 @@ const primarySmLink =
  */
 export function UploadDetail({ doc }: { doc: Doc }) {
   const status = STATUS_LABEL[doc.ingestStatus];
-  const isPreviewable = doc.mimeType?.includes("pdf") || doc.mimeType?.startsWith("image/");
-  const [objectUrl, setObjectUrl] = React.useState<string | null>(null);
-  const [previewFailed, setPreviewFailed] = React.useState(false);
-
-  React.useEffect(() => {
-    if (!isPreviewable) return;
-    let cancelled = false;
-    let url: string | null = null;
-    setObjectUrl(null);
-    setPreviewFailed(false);
-    readUploadBytes(doc.id)
-      .then((bytes) => {
-        if (cancelled) return;
-        const blob = new Blob([new Uint8Array(bytes)], {
-          type: doc.mimeType ?? "application/octet-stream",
-        });
-        url = URL.createObjectURL(blob);
-        setObjectUrl(url);
-      })
-      .catch(() => {
-        if (!cancelled) setPreviewFailed(true);
-      });
-    return () => {
-      cancelled = true;
-      if (url) URL.revokeObjectURL(url);
-    };
-    // Re-read only when the underlying file identity changes, not on
-    // ingest-status poll updates of the same doc.
-  }, [doc.id, doc.mimeType, isPreviewable]);
 
   return (
     <div className="mx-auto h-full max-w-3xl overflow-y-auto px-8 py-8">
@@ -95,24 +68,109 @@ export function UploadDetail({ doc }: { doc: Doc }) {
         <div className="border-b border-border bg-surface-raised px-4 py-2  font-medium text-muted">
           Preview · {fileTypeLabel(doc.mimeType, doc.kind)}
         </div>
-        {isPreviewable && !previewFailed ? (
-          objectUrl ? (
-            doc.mimeType?.startsWith("image/") ? (
-              <img src={objectUrl} alt={doc.title} className="max-h-[60vh] w-full object-contain" />
-            ) : (
-              <iframe title={doc.title} src={objectUrl} className="h-[60vh] w-full" />
-            )
-          ) : (
-            <div className="flex h-[20vh] items-center justify-center  text-faint">
-              Loading preview…
-            </div>
-          )
-        ) : (
-          <div className="max-h-[50vh] overflow-auto whitespace-pre-wrap px-4 py-4 font-mono  text-muted">
-            {doc.content.slice(0, 4000) || "No extracted text yet."}
-          </div>
-        )}
+        <UploadPreview doc={doc} />
       </div>
+    </div>
+  );
+}
+
+/** How the file itself renders. `extracted` (docx, xlsx, anything unknown)
+ *  falls back to the text ingestion pulled out of it. */
+type PreviewKind = "pdf" | "image" | "html" | "markdown" | "text" | "extracted";
+
+function previewKind(mime: string | null): PreviewKind {
+  if (!mime) return "extracted";
+  if (mime.includes("pdf")) return "pdf";
+  if (mime.startsWith("image/")) return "image";
+  if (mime.includes("html")) return "html";
+  if (mime.includes("markdown")) return "markdown";
+  if (mime.startsWith("text/")) return "text";
+  return "extracted";
+}
+
+/**
+ * Renders the upload's own bytes where we can: PDFs and images through an
+ * object URL, markdown through the note renderer, text/CSV verbatim, and HTML
+ * inside a sandboxed iframe — the webview holds IPC access, so an uploaded page
+ * never gets scripts, forms or same-origin rights (which also means its
+ * relative images and stylesheets don't load).
+ */
+function UploadPreview({ doc }: { doc: Doc }) {
+  const kind = previewKind(doc.mimeType);
+  const asText = kind === "html" || kind === "markdown" || kind === "text";
+  const [url, setUrl] = React.useState<string | null>(null);
+  const [text, setText] = React.useState<string | null>(null);
+  const [failed, setFailed] = React.useState(false);
+
+  React.useEffect(() => {
+    if (kind === "extracted") return;
+    let cancelled = false;
+    let objectUrl: string | null = null;
+    setUrl(null);
+    setText(null);
+    setFailed(false);
+    readUploadBytes(doc.id)
+      .then((bytes) => {
+        if (cancelled) return;
+        if (asText) {
+          setText(new TextDecoder().decode(bytes));
+          return;
+        }
+        const blob = new Blob([new Uint8Array(bytes)], {
+          type: doc.mimeType ?? "application/octet-stream",
+        });
+        objectUrl = URL.createObjectURL(blob);
+        setUrl(objectUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+    // Re-read only when the underlying file identity changes, not on
+    // ingest-status poll updates of the same doc.
+  }, [doc.id, doc.mimeType, kind, asText]);
+
+  if (kind === "extracted" || failed) {
+    return (
+      <div className="max-h-[50vh] overflow-auto whitespace-pre-wrap px-4 py-4 font-mono  text-muted">
+        {doc.content.slice(0, 4000) || "No extracted text yet."}
+      </div>
+    );
+  }
+  if (url === null && text === null) {
+    return (
+      <div className="flex h-[20vh] items-center justify-center  text-faint">Loading preview…</div>
+    );
+  }
+  if (kind === "image") {
+    return <img src={url!} alt={doc.title} className="max-h-[60vh] w-full object-contain" />;
+  }
+  if (kind === "pdf") {
+    return <iframe title={doc.title} src={url!} className="h-[60vh] w-full" />;
+  }
+  if (kind === "html") {
+    return (
+      <iframe
+        title={doc.title}
+        srcDoc={text!}
+        sandbox=""
+        className="h-[60vh] w-full bg-white"
+      />
+    );
+  }
+  if (kind === "markdown") {
+    return (
+      <div className="max-h-[60vh] overflow-auto px-4 py-4">
+        <MarkdownPreview content={text!} />
+      </div>
+    );
+  }
+  return (
+    <div className="max-h-[60vh] overflow-auto whitespace-pre-wrap px-4 py-4 font-mono  text-muted">
+      {text}
     </div>
   );
 }

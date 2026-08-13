@@ -552,6 +552,7 @@ fn mime_for(path: &Path) -> Option<&'static str> {
         "xls" => Some("application/vnd.ms-excel"),
         "csv" => Some("text/csv"),
         "md" | "markdown" => Some("text/markdown"),
+        "html" | "htm" => Some("text/html"),
         "txt" => Some("text/plain"),
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
@@ -561,8 +562,15 @@ fn mime_for(path: &Path) -> Option<&'static str> {
     }
 }
 
+/// Copies a file into the workspace as an upload document. `folder_id` files it
+/// under a tree folder — a purely logical placement: upload bytes always live in
+/// `files/<id>/`, never in the notes tree, so files mode has nothing to mirror.
 #[tauri::command]
-pub fn import_upload(state: State<AppState>, src_path: String) -> CmdResult<Doc> {
+pub fn import_upload(
+    state: State<AppState>,
+    src_path: String,
+    folder_id: Option<String>,
+) -> CmdResult<Doc> {
     let src = Path::new(&src_path);
     let file_name = src
         .file_name()
@@ -588,10 +596,12 @@ pub fn import_upload(state: State<AppState>, src_path: String) -> CmdResult<Doc>
     let conn = state.db.lock();
     let ts = now();
     conn.execute(
-        "INSERT INTO document (id, kind, title, content, file_path, mime_type, byte_size,
-                               ingest_status, created_at, updated_at)
-         VALUES (?1, 'upload', ?2, '', ?3, ?4, ?5, 'queued', ?6, ?6)",
-        params![id, title, rel_path, mime, byte_size, ts],
+        "INSERT INTO document (id, kind, title, content, folder_id, file_path, mime_type,
+                               byte_size, sort_order, ingest_status, created_at, updated_at)
+         VALUES (?1, 'upload', ?2, '', ?3, ?4, ?5, ?6,
+                 (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM document WHERE folder_id IS ?3),
+                 'queued', ?7, ?7)",
+        params![id, title, folder_id, rel_path, mime, byte_size, ts],
     )
     .map_err(err)?;
     get_doc(&conn, &id).map_err(err)?.ok_or_else(|| "not found".into())
