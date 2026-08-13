@@ -11,6 +11,32 @@ export interface FileDragEvent {
   paths: string[];
 }
 
+const inViewport = (p: { x: number; y: number }) =>
+  p.x >= 0 && p.y >= 0 && p.x <= window.innerWidth && p.y <= window.innerHeight;
+
+/**
+ * Drop point in CSS pixels, which is what the DOM (elementFromPoint) wants.
+ *
+ * Tauri types every platform's drop position as `PhysicalPosition`, but wry
+ * passes each platform's native coordinates through unscaled: AppKit points on
+ * macOS (wkwebview/drag_drop.rs) and GTK coordinates on Linux are already
+ * logical, while the Win32 drop target reports physical device pixels. So the
+ * devicePixelRatio divide applies on Windows only — doing it on a Retina Mac
+ * halves the point and the drop lands up and to the left of the cursor.
+ *
+ * The other reading is used as a fallback when the preferred one lands outside
+ * the viewport, so a future change to wry's contract degrades instead of
+ * breaking.
+ */
+function toCssPixels(x: number, y: number): { x: number; y: number } {
+  const dpr = window.devicePixelRatio || 1;
+  const scaled = { x: x / dpr, y: y / dpr };
+  const candidates = navigator.userAgent.includes("Windows")
+    ? [scaled, { x, y }]
+    : [{ x, y }, scaled];
+  return candidates.find(inViewport) ?? candidates[0]!;
+}
+
 /**
  * Subscribes to files dragged in from the OS. Tauri owns these events
  * (`dragDropEnabled` in tauri.conf.json) rather than the webview, because an
@@ -34,12 +60,11 @@ export function useFileDrop(handler: (event: FileDragEvent) => void): void {
           ref.current({ type: "leave", x: 0, y: 0, paths: [] });
           return;
         }
-        // Event coordinates are physical pixels; the DOM wants logical ones.
-        const scale = window.devicePixelRatio || 1;
+        const { x, y } = toCssPixels(payload.position.x, payload.position.y);
         ref.current({
           type: payload.type === "drop" ? "drop" : "over",
-          x: payload.position.x / scale,
-          y: payload.position.y / scale,
+          x,
+          y,
           paths: payload.type === "drop" ? payload.paths : [],
         });
       })
