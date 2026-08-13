@@ -1,40 +1,15 @@
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 import * as React from "react";
 
-/** An OS file drag over the webview, in logical (CSS) pixels. */
+/** An OS file drag over the webview, in CSS pixels relative to the page. */
 export interface FileDragEvent {
   type: "over" | "drop" | "leave";
   x: number;
   y: number;
   /** The dragged files — populated on "drop"; empty while hovering. */
   paths: string[];
-}
-
-const inViewport = (p: { x: number; y: number }) =>
-  p.x >= 0 && p.y >= 0 && p.x <= window.innerWidth && p.y <= window.innerHeight;
-
-/**
- * Drop point in CSS pixels, which is what the DOM (elementFromPoint) wants.
- *
- * Tauri types every platform's drop position as `PhysicalPosition`, but wry
- * passes each platform's native coordinates through unscaled: AppKit points on
- * macOS (wkwebview/drag_drop.rs) and GTK coordinates on Linux are already
- * logical, while the Win32 drop target reports physical device pixels. So the
- * devicePixelRatio divide applies on Windows only — doing it on a Retina Mac
- * halves the point and the drop lands up and to the left of the cursor.
- *
- * The other reading is used as a fallback when the preferred one lands outside
- * the viewport, so a future change to wry's contract degrades instead of
- * breaking.
- */
-function toCssPixels(x: number, y: number): { x: number; y: number } {
-  const dpr = window.devicePixelRatio || 1;
-  const scaled = { x: x / dpr, y: y / dpr };
-  const candidates = navigator.userAgent.includes("Windows")
-    ? [scaled, { x, y }]
-    : [{ x, y }, scaled];
-  return candidates.find(inViewport) ?? candidates[0]!;
 }
 
 /**
@@ -53,20 +28,77 @@ export function useFileDrop(handler: (event: FileDragEvent) => void): void {
   React.useEffect(() => {
     let unlisten: UnlistenFn | undefined;
     let disposed = false;
+    // Page origin on the desktop, physical px. Cached for the drag: the window
+    // can't move while a file drag is in flight.
+    let origin: { x: number; y: number } | null = null;
+    // An "over" lookup is out for IPC / the drag already landed.
+    let inFlight = false;
+    let dropped = false;
+
+    /**
+     * Top-left of the page on the desktop, in physical pixels: the window's
+     * client area (which excludes the title bar) plus the webview's offset
+     * inside it. `Webview.position()` is documented as desktop-relative but is
+     * really parent-relative — hence both halves.
+     */
+    async function pageOrigin(): Promise<{ x: number; y: number }> {
+      const [client, webview] = await Promise.all([
+        getCurrentWindow().innerPosition(),
+        getCurrentWebview().position(),
+      ]);
+      return { x: client.x + webview.x, y: client.y + webview.y };
+    }
+
+    /**
+     * Where the cursor is inside the page, in CSS pixels.
+     *
+     * The event payload can't be trusted for this: Tauri types every platform's
+     * position as PhysicalPosition, but wry forwards each platform's native
+     * coordinates unscaled — AppKit points on macOS, GTK coordinates on Linux,
+     * physical device pixels on Windows — and macOS flips y against the webview
+     * frame rather than the visible viewport. Asking the OS where the cursor is
+     * and where the page starts sidesteps the guesswork: both are physical and
+     * desktop-relative, so their difference over the device pixel ratio is the
+     * page coordinate.
+     */
+    async function pagePoint(): Promise<{ x: number; y: number }> {
+      origin ??= await pageOrigin();
+      const cursor = await cursorPosition();
+      const dpr = window.devicePixelRatio || 1;
+      return { x: (cursor.x - origin.x) / dpr, y: (cursor.y - origin.y) / dpr };
+    }
 
     void getCurrentWebview()
       .onDragDropEvent(({ payload }) => {
         if (payload.type === "leave") {
+          origin = null;
           ref.current({ type: "leave", x: 0, y: 0, paths: [] });
           return;
         }
-        const { x, y } = toCssPixels(payload.position.x, payload.position.y);
-        ref.current({
-          type: payload.type === "drop" ? "drop" : "over",
-          x,
-          y,
-          paths: payload.type === "drop" ? payload.paths : [],
-        });
+        // A fresh drag: re-read the origin in case the window moved.
+        if (payload.type === "enter") {
+          origin = null;
+          dropped = false;
+        }
+        const isDrop = payload.type === "drop";
+        // Hover events outrun the IPC round trip; coalesce them rather than
+        // queue up stale positions. A drop always goes through.
+        if (!isDrop && (inFlight || dropped)) return;
+        if (isDrop) dropped = true;
+        inFlight = true;
+
+        const paths = isDrop ? payload.paths : [];
+        void pagePoint()
+          .then(({ x, y }) => {
+            // A hover that resolved after the drop would revive the highlight.
+            if (disposed || (!isDrop && dropped)) return;
+            ref.current({ type: isDrop ? "drop" : "over", x, y, paths });
+          })
+          .catch((e: unknown) => console.error("file drop: locating the cursor failed", e))
+          .finally(() => {
+            inFlight = false;
+            if (isDrop) origin = null;
+          });
       })
       .then((fn) => {
         if (disposed) fn();
