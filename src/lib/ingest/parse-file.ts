@@ -29,6 +29,9 @@ export async function parseFileToText(doc: Doc, bytes: ArrayBuffer): Promise<Par
   ) {
     return { text: await parseXlsx(bytes) };
   }
+  if (mime.includes("html") || name.endsWith(".html") || name.endsWith(".htm")) {
+    return { text: parseHtml(bytes) };
+  }
   if (mime.startsWith("text/") || name.endsWith(".txt") || name.endsWith(".md")) {
     return { text: new TextDecoder().decode(bytes) };
   }
@@ -38,6 +41,17 @@ export async function parseFileToText(doc: Doc, bytes: ArrayBuffer): Promise<Par
     return { text: `Image file: ${doc.title}` };
   }
   return { text: new TextDecoder().decode(bytes) };
+}
+
+/**
+ * Tag-stripped text — chunking raw markup would bury the actual prose under
+ * attributes and inline CSS. DOMParser doesn't execute anything it parses.
+ */
+function parseHtml(bytes: ArrayBuffer): string {
+  const parsed = new DOMParser().parseFromString(new TextDecoder().decode(bytes), "text/html");
+  for (const el of parsed.querySelectorAll("script, style, noscript")) el.remove();
+  const text = parsed.body?.textContent ?? "";
+  return text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 async function parsePdf(bytes: ArrayBuffer): Promise<ParseResult> {

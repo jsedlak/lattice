@@ -35,6 +35,9 @@ export function fileTypeLabel(mime: string | null | undefined, kind: "note" | "u
   if (mime.includes("wordprocessingml")) return "DOCX";
   if (mime.includes("spreadsheetml") || mime.includes("ms-excel")) return "XLSX";
   if (mime.startsWith("image/")) return mime.replace("image/", "").toUpperCase();
+  if (mime.includes("html")) return "HTML";
+  if (mime.includes("markdown")) return "MD";
+  if (mime.includes("csv")) return "CSV";
   if (mime.startsWith("text/")) return "TXT";
   return "FILE";
 }

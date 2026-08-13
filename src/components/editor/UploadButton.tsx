@@ -1,17 +1,15 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import { Upload } from "lucide-react";
 import * as React from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Spinner } from "@/components/ui";
 import { cn } from "@/lib/cn";
-import { enqueueIngest } from "@/lib/ingest/pipeline";
-import { importUpload } from "@/lib/ipc";
+import { describeImportErrors, importUploads, pickUploadPaths } from "@/lib/uploads";
 
 /**
  * Desktop replacement for the web UploadButton: instead of a hidden
  * <input type="file"> + POST /api/upload, we open the native file picker and
- * let the Rust core copy the file into the app data dir, then kick ingestion.
+ * let the Rust core copy the files into the app data dir, then kick ingestion.
  */
 export function UploadButton({
   className,
@@ -25,25 +23,16 @@ export function UploadButton({
   const [error, setError] = React.useState<string | null>(null);
 
   async function onImport() {
-    const path = await open({
-      multiple: false,
-      filters: [
-        {
-          name: "Documents",
-          extensions: ["pdf", "docx", "xlsx", "xls", "txt", "md", "png", "jpg", "jpeg"],
-        },
-      ],
-    });
-    if (typeof path !== "string") return;
+    const paths = await pickUploadPaths();
+    if (paths.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const document = await importUpload(path);
-      enqueueIngest(document.id);
-      navigate(`/editor/${document.id}?tab=uploads`);
+      const { docs, errors } = await importUploads(paths);
+      setError(errors.length > 0 ? describeImportErrors(errors) : null);
+      // Land on the first import; the rest ingest in the background.
+      if (docs[0]) navigate(`/editor/${docs[0].id}?tab=uploads`);
       onRefresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err ?? "Import failed"));
     } finally {
       setBusy(false);
     }
@@ -60,9 +49,9 @@ export function UploadButton({
         )}
       >
         {busy ? <Spinner className="h-4 w-4" /> : <Upload className="h-4 w-4" />}
-        Import file
+        Import files
       </button>
-      {error && <p className="mt-1  text-graph-citation">{error}</p>}
+      {error && <p className="mt-1 whitespace-pre-wrap  text-graph-citation">{error}</p>}
     </div>
   );
 }

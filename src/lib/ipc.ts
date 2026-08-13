@@ -206,8 +206,10 @@ export const listIngestJobs = () => invoke<IngestJobRow[]>("list_ingest_jobs");
 
 // ── Uploads / files ──────────────────────────────────────────────────────────
 
-/** Copies a user-picked file into the app data dir and creates an upload doc. */
-export const importUpload = (srcPath: string) => invoke<Doc>("import_upload", { srcPath });
+/** Copies a user-picked file into the app data dir and creates an upload doc.
+ *  `folderId` files it under a tree folder; null leaves it at the root. */
+export const importUpload = (srcPath: string, folderId: string | null = null) =>
+  invoke<Doc>("import_upload", { srcPath, folderId });
 
 /** Raw bytes of an upload (for webview-side parsing / preview). */
 export async function readUploadBytes(documentId: string): Promise<ArrayBuffer> {
