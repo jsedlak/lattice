@@ -41,7 +41,7 @@ boundary as strings (`CmdResult<T> = Result<T, String>`).
 
 | Module | Owns |
 |---|---|
-| `docs.rs` | documents, folders, uploads, files-mode write-through |
+| `docs.rs` | documents, folders, uploads (from a path or raw pasted bytes), files-mode write-through |
 | `graph.rs` | nodes, edges, entities, chunks, vector search |
 | `chat.rs` | conversations, messages, ingest jobs |
 | `settings.rs` | settings.json (merge-write), keychain secrets |
@@ -120,7 +120,9 @@ A workspace is a directory:
 <workspace>/
   .lattice        { "version": 1, "storage": "database" | "files" }
   lattice.db      SQLite (+ -wal/-shm)
-  files/          uploads, files/{docId}/{filename}
+  files/          uploads, files/{docId}/{filename} — served to the webview
+                  by the `lattice-file` URI scheme (lib.rs) so notes can embed
+                  `![…](files/…)`; nothing outside files/ is reachable
   notes/          markdown tree — canonical in files mode
 ```
 

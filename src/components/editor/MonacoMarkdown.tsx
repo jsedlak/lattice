@@ -144,6 +144,12 @@ function latticeDecorations(
 const themeFor = (theme: string | undefined) =>
   theme === "light" ? "lattice-light" : "lattice-dark";
 
+/** What the pane needs from an editor engine beyond onChange. */
+export interface EditorHandle {
+  /** Replaces the selection (or inserts at the cursor) as one undoable edit. */
+  insertText: (text: string) => void;
+}
+
 /**
  * Uncontrolled: `value` seeds the model, edits flow out through onChange.
  * The parent remounts per document (key={doc.id}), matching how EditorPane
@@ -153,16 +159,20 @@ export function MonacoMarkdown({
   value,
   theme,
   onChange,
+  onReady,
   className,
 }: {
   value: string;
   theme?: string;
   onChange: (value: string) => void;
+  onReady?: (handle: EditorHandle) => void;
   className?: string;
 }) {
   const container = React.useRef<HTMLDivElement>(null);
   const onChangeRef = React.useRef(onChange);
   onChangeRef.current = onChange;
+  const onReadyRef = React.useRef(onReady);
+  onReadyRef.current = onReady;
   const initialValue = React.useRef(value);
   const initialTheme = React.useRef(theme);
 
@@ -204,6 +214,13 @@ export function MonacoMarkdown({
     const sub = editor.onDidChangeModelContent(() => {
       onChangeRef.current(editor.getValue());
       decorations.set(latticeDecorations(model));
+    });
+    onReadyRef.current?.({
+      insertText: (text) => {
+        const range = editor.getSelection() ?? model.getFullModelRange().collapseToEnd();
+        editor.executeEdits("lattice", [{ range, text, forceMoveMarkers: true }]);
+        editor.focus();
+      },
     });
     return () => {
       sub.dispose();

@@ -16,7 +16,8 @@ import type {
   StorageMode,
   WorkspaceInfo,
 } from "@/lib/types";
-import { DEFAULT_SETTINGS, LOCAL_EMBEDDING } from "@/lib/types";
+import { DEFAULT_PASTE_IMAGE_FORMAT, DEFAULT_SETTINGS, LOCAL_EMBEDDING } from "@/lib/types";
+import { formatPastedName } from "@/lib/uploads";
 import { languageModelFor } from "@/lib/ai/providers";
 import {
   invalidateAiSettings,
@@ -29,6 +30,15 @@ import { enqueueIngest, reingestAll } from "@/lib/ingest/pipeline";
 const EDITOR_OPTIONS: { value: EditorChoice; label: string; hint: string }[] = [
   { value: "monaco", label: "Monaco", hint: "VS Code's editor — default" },
   { value: "codemirror", label: "CodeMirror", hint: "lightweight alternative" },
+];
+
+const PASTE_IMAGE_OPTIONS: {
+  value: AppSettings["pasteImages"]["naming"];
+  label: string;
+  hint: string;
+}[] = [
+  { value: "format", label: "Name by format", hint: "timestamped — default" },
+  { value: "keep", label: "Keep the filename", hint: "as the clipboard names it" },
 ];
 
 const THEME_OPTIONS = [
@@ -374,6 +384,69 @@ export function SettingsScreen() {
                   </button>
                 ))}
               </div>
+            </section>
+
+            <section className="rounded-lg border border-border bg-surface p-5">
+              <h2 className="text-sm font-semibold">Pasted images</h2>
+              <p className="mt-0.5 text-xs text-muted">
+                How an image pasted into a note is named when it's stored as an upload.
+                Screenshots arrive from the clipboard as "image.png", so a timestamp keeps
+                them apart.
+              </p>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                {PASTE_IMAGE_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() =>
+                      setSettings({
+                        ...settings,
+                        pasteImages: { ...settings.pasteImages, naming: opt.value },
+                      })
+                    }
+                    className={cn(
+                      "rounded-md border px-3 py-2 text-left transition-colors",
+                      settings.pasteImages.naming === opt.value
+                        ? "border-accent bg-surface-raised"
+                        : "border-border hover:border-border-strong",
+                    )}
+                  >
+                    <div className="text-[13px] font-medium">{opt.label}</div>
+                    <div className="mt-0.5 text-[11px] text-muted">{opt.hint}</div>
+                  </button>
+                ))}
+              </div>
+              {settings.pasteImages.naming === "format" && (
+                <div className="mt-4">
+                  <label className="text-xs font-medium text-muted" htmlFor="paste-image-format">
+                    Filename format
+                  </label>
+                  <Input
+                    id="paste-image-format"
+                    className="mt-1 font-mono text-[13px]"
+                    value={settings.pasteImages.format}
+                    placeholder={DEFAULT_PASTE_IMAGE_FORMAT}
+                    onChange={(e) =>
+                      setSettings({
+                        ...settings,
+                        pasteImages: { ...settings.pasteImages, format: e.target.value },
+                      })
+                    }
+                  />
+                  <p className="mt-1.5 text-[11px] text-muted">
+                    Tokens: <code>YYYY</code> <code>YY</code> <code>MM</code> <code>dd</code>{" "}
+                    <code>HH</code> <code>mm</code> <code>ss</code> for the paste time,{" "}
+                    <code>{"{filename}"}</code> and <code>{"{extension}"}</code> for the
+                    clipboard's name. Example:{" "}
+                    <code>
+                      {formatPastedName(
+                        settings.pasteImages.format || DEFAULT_PASTE_IMAGE_FORMAT,
+                        "image",
+                        "png",
+                      )}
+                    </code>
+                  </p>
+                </div>
+              )}
             </section>
           </div>
         )}

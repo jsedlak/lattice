@@ -57,6 +57,10 @@ async function read(): Promise<Loaded> {
     chat: { ...DEFAULT_SETTINGS.chat, ...(raw?.chat ?? {}) },
     embedding: { ...DEFAULT_SETTINGS.embedding, ...(raw?.embedding ?? {}) },
     editor: raw?.editor === "codemirror" ? "codemirror" : DEFAULT_SETTINGS.editor,
+    pasteImages: {
+      naming: raw?.pasteImages?.naming === "keep" ? "keep" : "format",
+      format: raw?.pasteImages?.format?.trim() || DEFAULT_SETTINGS.pasteImages.format,
+    },
   };
   return { settings, present: new Set(raw?.secretsPresent ?? []) };
 }

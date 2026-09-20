@@ -7,6 +7,7 @@ import { Link } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import { Badge } from "@/components/ui";
+import { workspaceFileUrl } from "@/lib/ipc";
 import { remarkLattice } from "./remark-lattice";
 
 /**
@@ -18,6 +19,10 @@ import { remarkLattice } from "./remark-lattice";
  * Embedded HTML renders (rehype-raw) but is sanitized first: the webview has
  * IPC access, so scripts/event handlers in a note or an ingested document
  * must never execute.
+ *
+ * Images whose src is a workspace-relative `files/…` path (what path
+ * completion and paste-to-upload write) load through the lattice-file scheme;
+ * relative to the page they'd otherwise be 404s.
  */
 
 const sanitizeSchema = {
@@ -35,6 +40,10 @@ const sanitizeSchema = {
   },
 };
 const components: Components = {
+  img({ src, ...props }) {
+    const resolved = typeof src === "string" && src.startsWith("files/") ? workspaceFileUrl(src) : src;
+    return <img src={resolved} {...props} />;
+  },
   a({ href, children, ...props }) {
     if (href?.startsWith("lattice-tag:")) {
       return <Badge concept="tag">{children}</Badge>;

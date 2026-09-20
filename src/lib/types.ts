@@ -194,6 +194,16 @@ export interface LocalEmbeddingInfo {
 /** Markdown editor engine for the note editor. */
 export type EditorChoice = "monaco" | "codemirror";
 
+/** How an image pasted into the editor is named when stored as an upload. */
+export interface PasteImageSettings {
+  /** "keep": the clipboard's own name. "format": rendered from `format`. */
+  naming: "keep" | "format";
+  /** Date tokens (YYYY YY MM dd HH mm ss) plus {filename} and {extension}. */
+  format: string;
+}
+
+export const DEFAULT_PASTE_IMAGE_FORMAT = "YYMMddHHmmss-{filename}.{extension}";
+
 export interface AppSettings {
   chat: EndpointConfig;
   embedding: EndpointConfig & {
@@ -201,12 +211,14 @@ export interface AppSettings {
     dimensions: number;
   };
   editor: EditorChoice;
+  pasteImages: PasteImageSettings;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
   chat: { kind: "gateway", model: "anthropic/claude-opus-4-8" },
   embedding: { kind: "gateway", model: "openai/text-embedding-3-small", dimensions: 1536 },
   editor: "monaco",
+  pasteImages: { naming: "format", format: DEFAULT_PASTE_IMAGE_FORMAT },
 };
 
 /** Secret names within the store. All of them live in a single OS keychain
