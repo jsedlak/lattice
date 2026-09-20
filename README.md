@@ -59,7 +59,7 @@ Then:
 
 1. **Add a model** — open *Settings → AI*, pick a provider, paste an API key (stored in your OS keychain), and hit *Test connection*. Do the same for an embedding model.
 2. **Write** — create notes in the editor. Link them with `[[wikilinks]]` and `#tags`; the graph builds itself as you save.
-3. **Upload** — drop in PDFs, Word docs, or spreadsheets; they're parsed and ingested into the same graph.
+3. **Upload** — drop in PDFs, Word docs, or spreadsheets; they're parsed and ingested into the same graph. Paste an image or a file straight into a note and it's uploaded to the note's folder and linked at the cursor.
 4. **Explore & ask** — browse the graph view, or ask the assistant and follow its citations back to the source.
 
 <p align="center">

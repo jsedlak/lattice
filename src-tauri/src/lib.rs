@@ -96,6 +96,33 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
+        // Serves `files/…` out of the workspace so the markdown preview can
+        // render `![…](files/<id>/name.png)` — the link shape the editor's path
+        // completion and paste-to-upload both write. A dedicated scheme rather
+        // than Tauri's asset protocol: nothing outside `files/` is reachable,
+        // and the workspace can live anywhere without a scope entry per path.
+        // The frontend builds URLs with convertFileSrc(path, "lattice-file").
+        .register_uri_scheme_protocol("lattice-file", |ctx, request| {
+            use tauri::http::{header::CONTENT_TYPE, Response, StatusCode};
+            let rel = percent_encoding::percent_decode_str(request.uri().path().trim_start_matches('/'))
+                .decode_utf8_lossy()
+                .into_owned();
+            let served = ctx
+                .app_handle()
+                .try_state::<AppState>()
+                .ok_or(503u16)
+                .and_then(|state| commands::docs::read_workspace_file(&state, &rel));
+            match served {
+                Ok((mime, bytes)) => Response::builder()
+                    .header(CONTENT_TYPE, mime)
+                    .body(bytes)
+                    .unwrap(),
+                Err(status) => Response::builder()
+                    .status(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR))
+                    .body(Vec::new())
+                    .unwrap(),
+            }
+        })
         .setup(|app| {
             build_menu(app.handle())?;
 
@@ -147,6 +174,7 @@ pub fn run() {
             commands::docs::reorder_documents,
             commands::docs::reorder_folders,
             commands::docs::import_upload,
+            commands::docs::import_upload_bytes,
             commands::docs::read_upload_bytes,
             // graph, chunks, entities
             commands::graph::get_graph,

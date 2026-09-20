@@ -4,7 +4,7 @@
  * Command names are snake_case (Rust); argument keys are camelCase (Tauri
  * maps them onto snake_case Rust parameters).
  */
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 import type {
   AppSettings,
@@ -206,10 +206,35 @@ export const listIngestJobs = () => invoke<IngestJobRow[]>("list_ingest_jobs");
 
 // ── Uploads / files ──────────────────────────────────────────────────────────
 
-/** Copies a user-picked file into the app data dir and creates an upload doc.
- *  `folderId` files it under a tree folder; null leaves it at the root. */
-export const importUpload = (srcPath: string, folderId: string | null = null) =>
-  invoke<Doc>("import_upload", { srcPath, folderId });
+/** Where an upload goes: a new doc in `folderId` (null = tree root), stored
+ *  under its own name or `fileName`; or over an existing upload's file, which
+ *  keeps that doc's id, title and folder and re-queues it for ingest. */
+export type UploadTarget =
+  | { folderId: string | null; fileName?: string }
+  | { replaceId: string; fileName?: string };
+
+/** Copies a file on disk into the workspace as an upload doc. */
+export const importUpload = (srcPath: string, target: UploadTarget = { folderId: null }) =>
+  invoke<Doc>("import_upload", {
+    srcPath,
+    folderId: "folderId" in target ? target.folderId : null,
+    fileName: target.fileName ?? null,
+    replaceId: "replaceId" in target ? target.replaceId : null,
+  });
+
+/** Stores bytes that never had a path — a pasted clipboard image, a File from
+ *  the clipboard — as an upload doc. Raw body + headers: see import_upload_bytes. */
+export const importUploadBytes = (fileName: string, bytes: ArrayBuffer, target: UploadTarget) =>
+  invoke<Doc>("import_upload_bytes", new Uint8Array(bytes), {
+    headers: {
+      "x-file-name": encodeURIComponent(fileName),
+      "x-folder-id": ("folderId" in target ? target.folderId : null) ?? "",
+      "x-replace-id": "replaceId" in target ? target.replaceId : "",
+    },
+  });
+
+/** A URL the webview can load a workspace `files/…` path from (lattice-file scheme). */
+export const workspaceFileUrl = (relPath: string) => convertFileSrc(relPath, "lattice-file");
 
 /** Raw bytes of an upload (for webview-side parsing / preview). */
 export async function readUploadBytes(documentId: string): Promise<ArrayBuffer> {

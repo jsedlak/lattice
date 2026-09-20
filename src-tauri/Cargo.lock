@@ -2565,6 +2565,7 @@ dependencies = [
  "chrono",
  "keyring",
  "parking_lot",
+ "percent-encoding",
  "rusqlite",
  "serde",
  "serde_json",

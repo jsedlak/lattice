@@ -544,7 +544,7 @@ pub fn delete_folder(state: State<AppState>, id: String) -> CmdResult<()> {
 
 // ── Uploads ──────────────────────────────────────────────────────────────────
 
-fn mime_for(path: &Path) -> Option<&'static str> {
+pub(crate) fn mime_for(path: &Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "pdf" => Some("application/pdf"),
         "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
@@ -562,49 +562,181 @@ fn mime_for(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// Copies a file into the workspace as an upload document. `folder_id` files it
-/// under a tree folder — a purely logical placement: upload bytes always live in
-/// `files/<id>/`, never in the notes tree, so files mode has nothing to mirror.
-#[tauri::command]
-pub fn import_upload(
-    state: State<AppState>,
-    src_path: String,
-    folder_id: Option<String>,
-) -> CmdResult<Doc> {
-    let src = Path::new(&src_path);
-    let file_name = src
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or("invalid file path")?
-        .to_string();
-    let title = src
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or(&file_name)
-        .to_string();
-    let mime = mime_for(src).ok_or("unsupported file type")?;
+/// Where an incoming upload lands: a new document, or an existing one whose
+/// file is swapped out (paste-over-a-duplicate "Replace").
+enum Target {
+    New { folder_id: Option<String> },
+    Replace { id: String },
+}
 
-    let id = new_id();
+/// Stores an upload's bytes under `files/<id>/<file_name>` and records the
+/// document. `write` puts the file where it's told (copy from a path, write
+/// pasted bytes) and reports its size.
+///
+/// A new upload's `folder_id` is a purely logical placement: upload bytes
+/// always live in `files/<id>/`, never in the notes tree, so files mode has
+/// nothing to mirror. Replacing keeps the document's id, title and folder —
+/// every `[[link]]` and `![…](files/<id>/…)` pointing at it stays valid — and
+/// clears the extracted content so ingest rebuilds chunks and graph from the
+/// new bytes.
+fn store_upload(
+    state: &AppState,
+    target: Target,
+    file_name: &str,
+    write: impl FnOnce(&Path) -> std::io::Result<u64>,
+) -> CmdResult<Doc> {
+    let mime = mime_for(Path::new(file_name)).ok_or("unsupported file type")?;
+    let title = Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_name)
+        .to_string();
+    let (id, previous) = match &target {
+        Target::New { .. } => (new_id(), None),
+        Target::Replace { id } => {
+            let conn = state.db.lock();
+            let doc = get_doc(&conn, id).map_err(err)?.ok_or("document not found")?;
+            if doc.kind != "upload" {
+                return Err("only uploads can be replaced".into());
+            }
+            (id.clone(), doc.file_path)
+        }
+    };
     let dest_dir = state.workspace_dir.join("files").join(&id);
     fs::create_dir_all(&dest_dir).map_err(err)?;
-    let dest = dest_dir.join(&file_name);
-    fs::copy(src, &dest).map_err(err)?;
-    let byte_size = fs::metadata(&dest).map_err(err)?.len() as i64;
+    // Same name in a different case (macOS, Windows) would otherwise leave
+    // the old bytes behind under the old spelling.
+    if let Some(old) = previous {
+        let _ = fs::remove_file(state.workspace_dir.join(old));
+    }
+    let byte_size = write(&dest_dir.join(file_name)).map_err(err)? as i64;
     // Stored relative to the data dir so the whole dir is relocatable.
     let rel_path = format!("files/{id}/{file_name}");
 
     let conn = state.db.lock();
     let ts = now();
-    conn.execute(
-        "INSERT INTO document (id, kind, title, content, folder_id, file_path, mime_type,
-                               byte_size, sort_order, ingest_status, created_at, updated_at)
-         VALUES (?1, 'upload', ?2, '', ?3, ?4, ?5, ?6,
-                 (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM document WHERE folder_id IS ?3),
-                 'queued', ?7, ?7)",
-        params![id, title, folder_id, rel_path, mime, byte_size, ts],
-    )
-    .map_err(err)?;
+    match target {
+        Target::New { folder_id } => {
+            conn.execute(
+                "INSERT INTO document (id, kind, title, content, folder_id, file_path, mime_type,
+                                       byte_size, sort_order, ingest_status, created_at, updated_at)
+                 VALUES (?1, 'upload', ?2, '', ?3, ?4, ?5, ?6,
+                         (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM document WHERE folder_id IS ?3),
+                         'queued', ?7, ?7)",
+                params![id, title, folder_id, rel_path, mime, byte_size, ts],
+            )
+            .map_err(err)?;
+        }
+        Target::Replace { .. } => {
+            conn.execute(
+                "UPDATE document SET content = '', file_path = ?2, mime_type = ?3, byte_size = ?4,
+                        page_count = NULL, ingest_status = 'queued', ingest_error = NULL,
+                        updated_at = ?5
+                 WHERE id = ?1",
+                params![id, rel_path, mime, byte_size, ts],
+            )
+            .map_err(err)?;
+        }
+    }
     get_doc(&conn, &id).map_err(err)?.ok_or_else(|| "not found".into())
+}
+
+/// Copies a file into the workspace as an upload document. `file_name`
+/// overrides the source's name ("Keep both" numbering a duplicate);
+/// `replace_id` swaps the file of an existing upload instead of creating one.
+#[tauri::command]
+pub fn import_upload(
+    state: State<AppState>,
+    src_path: String,
+    folder_id: Option<String>,
+    file_name: Option<String>,
+    replace_id: Option<String>,
+) -> CmdResult<Doc> {
+    let src = Path::new(&src_path);
+    let file_name = match file_name {
+        Some(name) => clean_file_name(&name)?,
+        None => src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("invalid file path")?
+            .to_string(),
+    };
+    let target = match replace_id {
+        Some(id) => Target::Replace { id },
+        None => Target::New { folder_id },
+    };
+    store_upload(&state, target, &file_name, |dest| fs::copy(src, dest))
+}
+
+/// Writes bytes handed over by the webview as an upload document — the path
+/// for content that never had a file on disk, such as an image pasted from
+/// the clipboard. The body is the raw file; metadata travels in headers
+/// because a raw IPC body can't carry JSON arguments alongside it:
+/// `x-file-name` (percent-encoded, headers are ASCII), `x-folder-id` (absent
+/// or empty for the tree root) and `x-replace-id` (an existing upload to
+/// overwrite, see `store_upload`).
+#[tauri::command]
+pub fn import_upload_bytes(
+    state: State<AppState>,
+    request: tauri::ipc::Request<'_>,
+) -> CmdResult<Doc> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected a raw file body".into());
+    };
+    let header = |name: &str| -> Option<String> {
+        let raw = request.headers().get(name)?.to_str().ok()?;
+        Some(percent_encoding::percent_decode_str(raw).decode_utf8_lossy().into_owned())
+    };
+    let file_name = clean_file_name(&header("x-file-name").ok_or("missing file name")?)?;
+    let target = match header("x-replace-id").filter(|id| !id.is_empty()) {
+        Some(id) => Target::Replace { id },
+        None => Target::New {
+            folder_id: header("x-folder-id").filter(|id| !id.is_empty()),
+        },
+    };
+    store_upload(&state, target, &file_name, |dest| {
+        fs::write(dest, bytes).map(|()| bytes.len() as u64)
+    })
+}
+
+/// A file name chosen by the webview, made safe to write: same rules as note
+/// filenames (no separators, no control characters, nothing that hides the
+/// file or trips Windows), extension lower-cased since mime_for keys on it.
+fn clean_file_name(name: &str) -> CmdResult<String> {
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(workspace::sanitize_stem)
+        .ok_or("invalid file name")?;
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .ok_or("unsupported file type")?;
+    Ok(format!("{stem}.{ext}"))
+}
+
+/// Reads a workspace file for the `lattice-file` URI scheme (how the preview
+/// renders `![…](files/<id>/name.png)`). Only `files/…` is reachable, and the
+/// path is checked component-wise so `..` can't escape the workspace. Errors
+/// are the HTTP status the protocol handler should answer with.
+pub(crate) fn read_workspace_file(
+    state: &AppState,
+    rel: &str,
+) -> Result<(&'static str, Vec<u8>), u16> {
+    use std::path::Component;
+    let rel = Path::new(rel);
+    let mut parts = rel.components();
+    if parts.next() != Some(Component::Normal("files".as_ref())) {
+        return Err(403);
+    }
+    if !parts.all(|c| matches!(c, Component::Normal(_))) {
+        return Err(403);
+    }
+    let mime = mime_for(rel).ok_or(415u16)?;
+    let bytes = fs::read(state.workspace_dir.join(rel)).map_err(|_| 404u16)?;
+    Ok((mime, bytes))
 }
 
 #[tauri::command]

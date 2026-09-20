@@ -148,7 +148,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
         embedding = { ...emb, dimensions: vector.length };
       }
       await saveSettings(
-        { chat, embedding, editor: DEFAULT_SETTINGS.editor },
+        { ...DEFAULT_SETTINGS, chat, embedding },
         {
           "chat-api-key": chatKey || undefined,
           "embedding-api-key": skipEmbedding ? undefined : embKey || undefined,

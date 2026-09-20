@@ -181,6 +181,11 @@
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+.markdown-preview img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
 .markdown-preview blockquote {
   border-left: 3px solid var(--border-strong);
   padding-left: 1rem;

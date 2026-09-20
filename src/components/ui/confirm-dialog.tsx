@@ -18,46 +18,82 @@ export interface ConfirmOptions {
   destructive?: boolean;
 }
 
-const ConfirmContext = React.createContext<(opts: ConfirmOptions) => Promise<boolean>>(() =>
-  Promise.resolve(false),
-);
+/** One button in a multi-way dialog. `value` is what the promise resolves to. */
+export interface ChoiceOption<T extends string> {
+  value: T;
+  label: string;
+  destructive?: boolean;
+}
+
+export interface ChooseOptions<T extends string> {
+  title: string;
+  description?: string;
+  /** Rendered left to right; the last one is focused, so Enter picks it. */
+  options: ChoiceOption<T>[];
+  cancelLabel?: string;
+}
+
+type Choose = <T extends string>(opts: ChooseOptions<T>) => Promise<T | null>;
+
+const ChooseContext = React.createContext<Choose>(() => Promise.resolve(null));
+
+/** `const choose = useChoose()` → `await choose({ title, options })` resolves to
+ *  the picked option's value, or null on cancel/escape. For dialogs with more
+ *  than one way forward (Replace / Keep both). */
+export function useChoose(): Choose {
+  return React.useContext(ChooseContext);
+}
 
 /** `const confirm = useConfirm()` → `await confirm({ title, ... })` resolves to
  *  true/false. Replaces window.confirm with a styled alert dialog. */
 export function useConfirm() {
-  return React.useContext(ConfirmContext);
+  const choose = useChoose();
+  return React.useCallback(
+    async (opts: ConfirmOptions) =>
+      (await choose({
+        title: opts.title,
+        description: opts.description,
+        cancelLabel: opts.cancelLabel,
+        options: [
+          { value: "ok", label: opts.confirmLabel ?? "Continue", destructive: opts.destructive },
+        ],
+      })) === "ok",
+    [choose],
+  );
 }
 
 export function ConfirmProvider({ children }: { children: React.ReactNode }) {
-  const [state, setState] = React.useState<{ open: boolean; opts: ConfirmOptions }>({
+  const [state, setState] = React.useState<{ open: boolean; opts: ChooseOptions<string> }>({
     open: false,
-    opts: { title: "" },
+    opts: { title: "", options: [] },
   });
-  const resolveRef = React.useRef<((value: boolean) => void) | null>(null);
+  const resolveRef = React.useRef<((value: string | null) => void) | null>(null);
   const actionRef = React.useRef<HTMLButtonElement>(null);
 
-  const confirm = React.useCallback(
-    (opts: ConfirmOptions) =>
-      new Promise<boolean>((resolve) => {
-        resolveRef.current = resolve;
+  const choose = React.useCallback(
+    <T extends string>(opts: ChooseOptions<T>) =>
+      new Promise<T | null>((resolve) => {
+        resolveRef.current = resolve as (value: string | null) => void;
         setState({ open: true, opts });
       }),
     [],
   );
 
-  const settle = React.useCallback((value: boolean) => {
+  const settle = React.useCallback((value: string | null) => {
     resolveRef.current?.(value);
     resolveRef.current = null; // idempotent — later calls (e.g. onOpenChange) no-op
     setState((s) => ({ ...s, open: false }));
   }, []);
 
+  const last = state.opts.options.length - 1;
+
   return (
-    <ConfirmContext.Provider value={confirm}>
+    <ChooseContext.Provider value={choose}>
       {children}
-      <AlertDialog open={state.open} onOpenChange={(open) => !open && settle(false)}>
+      <AlertDialog open={state.open} onOpenChange={(open) => !open && settle(null)}>
         <AlertDialogContent
           // Radix focuses Cancel by default, which makes Enter dismiss the
-          // dialog. Focus the confirm button instead so Enter accepts (Escape
+          // dialog. Focus the primary action instead so Enter accepts (Escape
           // still cancels) — preventDefault stops Radix's own focus handler.
           onOpenAutoFocus={(e) => {
             e.preventDefault();
@@ -71,19 +107,22 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
             )}
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel onClick={() => settle(false)}>
+            <AlertDialogCancel onClick={() => settle(null)}>
               {state.opts.cancelLabel ?? "Cancel"}
             </AlertDialogCancel>
-            <AlertDialogAction
-              ref={actionRef}
-              destructive={state.opts.destructive}
-              onClick={() => settle(true)}
-            >
-              {state.opts.confirmLabel ?? "Continue"}
-            </AlertDialogAction>
+            {state.opts.options.map((opt, i) => (
+              <AlertDialogAction
+                key={opt.value}
+                ref={i === last ? actionRef : undefined}
+                destructive={opt.destructive}
+                onClick={() => settle(opt.value)}
+              >
+                {opt.label}
+              </AlertDialogAction>
+            ))}
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </ConfirmContext.Provider>
+    </ChooseContext.Provider>
   );
 }

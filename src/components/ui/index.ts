@@ -44,7 +44,14 @@ export {
   AlertDialogAction,
   AlertDialogCancel,
 } from "./alert-dialog";
-export { ConfirmProvider, useConfirm, type ConfirmOptions } from "./confirm-dialog";
+export {
+  ConfirmProvider,
+  useChoose,
+  useConfirm,
+  type ChoiceOption,
+  type ChooseOptions,
+  type ConfirmOptions,
+} from "./confirm-dialog";
 export { Spinner } from "./spinner";
 export { Separator } from "./separator";
 export { Logo, LogoMark } from "./logo";

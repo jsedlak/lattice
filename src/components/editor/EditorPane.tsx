@@ -1,12 +1,12 @@
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { Check, Columns2, Loader2, MessageSquare } from "lucide-react";
 import { useTheme } from "next-themes";
 import * as React from "react";
 import { Link } from "react-router-dom";
 
 import { MarkdownPreview } from "@/components/editor/MarkdownPreview";
-import { MonacoMarkdown } from "@/components/editor/MonacoMarkdown";
-import { ResizeHandle } from "@/components/ui";
+import { type EditorHandle, MonacoMarkdown } from "@/components/editor/MonacoMarkdown";
+import { ResizeHandle, useChoose } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { loadSettings } from "@/lib/ai/settings";
 import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
@@ -14,6 +14,13 @@ import { latticeEditorExtensions } from "@/lib/codemirror-lattice";
 import { buildDeterministic } from "@/lib/graph-build";
 import { enqueueIngest } from "@/lib/ingest/pipeline";
 import { updateDocument } from "@/lib/ipc";
+import {
+  type ConflictChoice,
+  describeImportErrors,
+  importPasted,
+  markdownForUpload,
+  pastedFiles,
+} from "@/lib/uploads";
 import type { Doc, EditorChoice } from "@/lib/types";
 
 type SaveState = "idle" | "saving" | "saved";
@@ -26,6 +33,7 @@ const outlineSmLink =
 
 export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void }) {
   const { resolvedTheme } = useTheme();
+  const choose = useChoose();
   const [title, setTitle] = React.useState(doc.title);
   const [content, setContent] = React.useState(doc.content);
   const [save, setSave] = React.useState<SaveState>("idle");
@@ -34,6 +42,12 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
   const [split, setSplit] = React.useState(() => layoutBootCache().editorSplit);
   const splitRef = React.useRef(split);
   const splitRowRef = React.useRef<HTMLDivElement>(null);
+  // Whichever engine is mounted — CodeMirror through its ref, Monaco through
+  // the handle it reports on mount — so a paste can land text at the cursor.
+  const cmRef = React.useRef<ReactCodeMirrorRef>(null);
+  const monacoRef = React.useRef<EditorHandle | null>(null);
+  const [uploading, setUploading] = React.useState(false);
+  const [uploadError, setUploadError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     void loadSettings().then((s) => setEditorChoice(s.editor));
@@ -154,6 +168,57 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
     return () => window.removeEventListener("keydown", onKey);
   }, [persist, title, content]);
 
+  const insertText = React.useCallback((text: string) => {
+    const view = cmRef.current?.view;
+    if (view) {
+      view.dispatch(view.state.replaceSelection(text));
+      view.focus();
+      return;
+    }
+    monacoRef.current?.insertText(text);
+  }, []);
+
+  /**
+   * Pasting a file into the editor uploads it beside the note — into the
+   * note's folder — and drops a reference at the cursor: images embed
+   * (`![…](files/…)`), anything else links (`[[title]]`). Capture phase on
+   * the wrapper, so the engine never sees the event and can't paste the
+   * clipboard's text/html fallback (a copied browser image carries both).
+   * Ordinary text pastes fall through untouched.
+   */
+  const onPaste = React.useCallback(
+    (e: React.ClipboardEvent) => {
+      const pasted = pastedFiles(e.clipboardData);
+      if (!pasted) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setUploading(true);
+      setUploadError(null);
+      const resolveConflict = (fileName: string) =>
+        choose<ConflictChoice>({
+          title: `"${fileName}" already exists`,
+          description:
+            "This folder already has a file with that name. Replace it with the pasted one, or keep both with a number added to the new file?",
+          options: [
+            { value: "replace", label: "Replace", destructive: true },
+            { value: "keep-both", label: "Keep both" },
+          ],
+        });
+      void importPasted(pasted, doc.folderId, resolveConflict)
+        .then(({ docs, errors }) => {
+          if (docs.length > 0) {
+            // One reference per line: an image line is a block in markdown.
+            insertText(docs.map(markdownForUpload).join("\n"));
+            onRefresh();
+          }
+          setUploadError(errors.length > 0 ? describeImportErrors(errors) : null);
+        })
+        .catch((err: unknown) => setUploadError(err instanceof Error ? err.message : String(err)))
+        .finally(() => setUploading(false));
+    },
+    [choose, doc.folderId, insertText, onRefresh],
+  );
+
   const words = content.trim() ? content.trim().split(/\s+/).length : 0;
 
   return (
@@ -170,6 +235,11 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
           aria-label="Document title"
         />
         <SaveIndicator state={save} />
+        {uploading && (
+          <span className="flex items-center gap-1  text-faint">
+            <Loader2 className="h-3 w-3 animate-spin" /> Uploading
+          </span>
+        )}
         <span className=" text-faint">{words} words</span>
         <button
           type="button"
@@ -191,6 +261,12 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         </Link>
       </div>
 
+      {uploadError && (
+        <p className="shrink-0 whitespace-pre-wrap border-b border-border px-4 py-1.5 text-graph-citation">
+          {uploadError}
+        </p>
+      )}
+
       {/* Split */}
       <div ref={splitRowRef} className="flex min-h-0 flex-1">
         {/* Full-bleed editing surface: the surface bg marks the editable area
@@ -203,9 +279,11 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
             "relative min-h-0 bg-surface",
             showPreview ? "border-r border-border" : "w-full",
           )}
+          onPasteCapture={onPaste}
         >
             {editorChoice === "codemirror" ? (
               <CodeMirror
+                ref={cmRef}
                 value={content}
                 height="100%"
                 className="absolute inset-0 px-2 py-1"
@@ -227,6 +305,9 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
                 value={content}
                 theme={resolvedTheme}
                 className="absolute inset-0 pl-1 pt-1"
+                onReady={(h) => {
+                  monacoRef.current = h;
+                }}
                 onChange={(val) => {
                   setContent(val);
                   scheduleSave({ content: val });
