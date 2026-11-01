@@ -490,7 +490,7 @@ pub fn rename_folder(state: State<AppState>, id: String, name: String) -> CmdRes
 
 /// `root` plus every folder beneath it, parents before children. folder.parent_id
 /// has no FK, so a subtree delete has to walk the tree itself.
-fn folder_subtree_ids(conn: &Connection, root: &str) -> CmdResult<Vec<String>> {
+pub(crate) fn folder_subtree_ids(conn: &Connection, root: &str) -> CmdResult<Vec<String>> {
     let mut ids = vec![root.to_string()];
     let mut i = 0;
     while i < ids.len() {

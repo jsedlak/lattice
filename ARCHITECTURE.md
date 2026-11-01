@@ -262,9 +262,29 @@ and the server with it).
   `traverse` keep the names and descriptions from `src/lib/ai/tools.ts` so
   behavior matches the in-app assistant. `getSubgraph`, `getDocument`, and
   `listDocuments` are additions an external agent needs and the assistant got
-  from the UI. Read-only. Results are capped (snippets truncated, subgraphs
-  capped at 200 nodes with `truncated: true`) so a hub tag can't dump the graph
-  into the caller's context.
+  from the UI. `listFolders`, `createFolder`, `createNote`, `editNote`,
+  `renameNote`, and `renameFolder` are the write side — **no delete**: the worst
+  an agent can do is overwrite a note's text, never remove one. They call the
+  same `create_*`/`update_document`/`rename_folder` commands the UI does (files
+  mode stays disk-first), validating ids first since folder ids have no FK and
+  the tree never sends a bad one. `editNote` prefers exact-once find-and-replace
+  `edits` over whole-note `content`, all or nothing — a replace-all on an
+  ambiguous snippet is how an agent edits the wrong paragraph unnoticed. Renames
+  don't rewrite `[[wikilinks]]` (neither does the tree); the instructions tell
+  the agent so. Graph upkeep stays in TypeScript: each write emits
+  `mcp-documents-changed` with `ingest` (new/edited text — also given a durable
+  `queued` `ingest_job` row first), `edited`, and `rebuild` (title or folder
+  path changed) ids. Shell, always mounted, runs `enqueueIngest` /
+  `rebuildFolderContext` as the editor and tree do after their own edits (a
+  rename rebuild also refreshes the document node's label); the same event
+  (`src/lib/mcp-events.ts`) refreshes the tree and Recent list. An
+  open `EditorPane` adopts edited text and remounts its engine (Monaco is
+  uncontrolled) — unless the user has unsaved or in-flight typing, in which case
+  their save wins. With no webview listening, launch-time
+  `resumePendingIngest` picks up queued ingest; a missed `rebuild` waits for the
+  note's next save. Results are capped (snippets truncated, subgraphs capped at
+  200 nodes with `truncated: true`) so a hub tag can't dump the graph into the
+  caller's context.
 - **`instructions`** — returned by `initialize`, and load-bearing: the in-app
   assistant learns the graph vocabulary (node types, `deterministic` vs `llm`
   edge origins, folder-paths-as-tags) from its system prompt, and an MCP client

@@ -146,9 +146,9 @@ export function McpServer() {
             <h2 className="text-sm font-semibold">MCP server</h2>
             <p className="mt-0.5 max-w-lg text-xs text-muted">
               Lets Claude Code, Claude Desktop, or any MCP client search your
-              notes and traverse the graph. It listens on loopback only, requires
-              a bearer token, and is read-only — agents can read your knowledge
-              base but cannot change it.
+              notes, traverse the graph, and create, edit, or rename notes and
+              folders. It listens on loopback only and requires a bearer token.
+              Agents can never delete anything.
             </p>
           </div>
           <Button

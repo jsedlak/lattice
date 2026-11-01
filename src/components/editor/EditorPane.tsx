@@ -13,7 +13,8 @@ import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-
 import { latticeEditorExtensions } from "@/lib/codemirror-lattice";
 import { buildDeterministic } from "@/lib/graph-build";
 import { enqueueIngest } from "@/lib/ingest/pipeline";
-import { updateDocument } from "@/lib/ipc";
+import { getDocument, updateDocument } from "@/lib/ipc";
+import { useMcpDocumentsChanged } from "@/lib/mcp-events";
 import {
   type ConflictChoice,
   describeImportErrors,
@@ -76,10 +77,18 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
     }
   }, [doc.title]);
 
+  // Saves currently awaiting the backend. Nonzero means disk is about to
+  // change under us, so it's not safe to adopt an external edit.
+  const inFlight = React.useRef(0);
+  // Bumped to remount the editor engine with new text — Monaco is
+  // uncontrolled, so changing `value` alone wouldn't show it.
+  const [engineKey, setEngineKey] = React.useState(0);
+
   const persist = React.useCallback(
     async (patch: { title?: string; content?: string }) => {
       if (patch.title === undefined && patch.content === undefined) return;
       setSave("saving");
+      inFlight.current += 1;
       try {
         const saved = await updateDocument(doc.id, patch);
         setSave("saved");
@@ -107,10 +116,25 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         }
       } catch {
         setSave("idle");
+      } finally {
+        inFlight.current -= 1;
       }
     },
     [doc.id, onRefresh],
   );
+
+  // An MCP agent edited this note. Show its text — unless the user has typing
+  // that hasn't landed yet, in which case their next save wins (it's their
+  // editor). Checked again after the read, since typing may start meanwhile.
+  const canAdopt = () => pending.current.content === undefined && inFlight.current === 0;
+  useMcpDocumentsChanged(({ edited }) => {
+    if (!edited.includes(doc.id) || !canAdopt()) return;
+    void getDocument(doc.id).then((fresh) => {
+      if (!fresh || !canAdopt()) return;
+      setContent(fresh.content);
+      setEngineKey((k) => k + 1);
+    });
+  });
 
   const scheduleSave = React.useCallback(
     (patch: { title?: string; content?: string }) => {
@@ -283,6 +307,7 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         >
             {editorChoice === "codemirror" ? (
               <CodeMirror
+                key={engineKey}
                 ref={cmRef}
                 value={content}
                 height="100%"
@@ -302,6 +327,7 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
               />
             ) : editorChoice === "monaco" ? (
               <MonacoMarkdown
+                key={engineKey}
                 value={content}
                 theme={resolvedTheme}
                 className="absolute inset-0 pl-1 pt-1"
