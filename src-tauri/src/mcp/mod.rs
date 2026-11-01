@@ -347,7 +347,7 @@ mod tests {
         let tools = rpc(port, "tools/list", Value::Null);
         let names: Vec<&str> =
             tools["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names.len(), 7, "unexpected tool set: {names:?}");
+        assert_eq!(names.len(), 13, "unexpected tool set: {names:?}");
         assert!(names.contains(&"semanticSearch") && names.contains(&"getSubgraph"));
 
         // listDocuments — previews only, never the full body.
@@ -384,6 +384,188 @@ mod tests {
         assert_eq!(body, Value::Null);
 
         drop(handle);
+    }
+
+    /// Folder → nested folder → note inside it → edit → renames, read back
+    /// through the same tools an agent would use. Run in both storage modes: files mode is where
+    /// the disk-first path, sanitizing, and deduping live.
+    fn creates_and_edits_folders_and_notes(dir: &Path, mode: crate::workspace::StorageMode) {
+        let (app, _, _) = seeded_app(dir);
+        *app.state::<AppState>().storage_mode.lock() = mode;
+        let handle = serve(app.handle(), TOKEN.to_string(), 0).unwrap();
+        let port = handle.port;
+
+        let work = call_tool(port, "createFolder", json!({ "name": "work" }));
+        let projects =
+            call_tool(port, "createFolder", json!({ "name": "projects", "parentId": work["folderId"] }));
+        assert_eq!(projects["path"], "work/projects");
+
+        let listed = call_tool(port, "listFolders", json!({ "recursive": true }));
+        let paths: Vec<&str> =
+            listed["folders"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+        assert_eq!(paths, ["work", "work/projects"]);
+
+        let note = call_tool(
+            port,
+            "createNote",
+            json!({ "title": "Gemini", "content": "Follows [[Apollo]]. #space", "folderId": projects["folderId"] }),
+        );
+        assert_eq!(note["title"], "Gemini");
+        assert_eq!(note["folderId"], projects["folderId"]);
+        assert_eq!(note["ingestStatus"], "queued");
+
+        // Readable immediately, and queued durably so a relaunch would ingest it.
+        let doc = call_tool(port, "getDocument", json!({ "documentId": note["documentId"] }));
+        assert_eq!(doc["content"], "Follows [[Apollo]]. #space");
+        let status: String = app
+            .state::<AppState>()
+            .db
+            .lock()
+            .query_row(
+                "SELECT status FROM ingest_job WHERE document_id = ?1",
+                [note["documentId"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "queued");
+
+        // A bad folder id is a recoverable tool error, not an orphaned note.
+        let bad = rpc(
+            port,
+            "tools/call",
+            json!({ "name": "createNote", "arguments": { "title": "Lost", "folderId": "nope" } }),
+        );
+        assert_eq!(bad["isError"], true);
+        assert_eq!(call_tool(port, "listDocuments", json!({}))["total"], 2);
+
+        // editNote: exact-once edits, all or nothing.
+        let id = note["documentId"].clone();
+        let edited = call_tool(
+            port,
+            "editNote",
+            json!({ "documentId": id, "edits": [{ "oldText": "[[Apollo]]", "newText": "[[Mercury]]" }] }),
+        );
+        assert_eq!(edited["changed"], true);
+        let ambiguous = rpc(
+            port,
+            "tools/call",
+            json!({ "name": "editNote", "arguments": {
+                "documentId": id,
+                "edits": [{ "oldText": "Follows", "newText": "Precedes" }, { "oldText": "nope", "newText": "" }],
+            } }),
+        );
+        assert_eq!(ambiguous["isError"], true);
+        let doc = call_tool(port, "getDocument", json!({ "documentId": id }));
+        assert_eq!(doc["content"], "Follows [[Mercury]]. #space", "a failed batch must change nothing");
+
+        // renameNote and renameFolder: the stored names come back.
+        let renamed = call_tool(port, "renameNote", json!({ "documentId": id, "title": "Gemini 2" }));
+        assert_eq!(renamed["title"], "Gemini 2");
+        let folder = call_tool(port, "renameFolder", json!({ "folderId": work["folderId"], "name": "job" }));
+        assert_eq!(folder["path"], "job");
+        assert_eq!(folder["notesRetagged"], 1, "the note two levels down carries the tag");
+        let paths: Vec<String> = call_tool(port, "listFolders", json!({ "recursive": true }))["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(paths, ["job", "job/projects"]);
+        let doc = call_tool(port, "getDocument", json!({ "documentId": id }));
+        assert_eq!(doc["title"], "Gemini 2");
+        assert_eq!(doc["content"], "Follows [[Mercury]]. #space");
+
+        drop(handle);
+    }
+
+    #[test]
+    fn writes_in_database_mode() {
+        creates_and_edits_folders_and_notes(&scratch("create-db"), crate::workspace::StorageMode::Database);
+    }
+
+    #[test]
+    fn writes_in_files_mode() {
+        let dir = scratch("create-files");
+        creates_and_edits_folders_and_notes(&dir, crate::workspace::StorageMode::Files);
+        // After the edit and both renames, the file moved with them.
+        let on_disk = std::fs::read_to_string(dir.join("notes/job/projects/Gemini 2.md")).unwrap();
+        assert_eq!(on_disk, "Follows [[Mercury]]. #space");
+        assert!(!dir.join("notes/work").exists());
+    }
+
+    /// No two folders, notes or uploads in one folder may share a name, ignoring
+    /// case — for agents and for the UI's own create/rename/move paths. The
+    /// seed holds a note "Apollo" at the top level.
+    fn enforces_unique_names(dir: &Path, mode: crate::workspace::StorageMode) {
+        use crate::commands::docs;
+        let (app, apollo, _) = seeded_app(dir);
+        *app.state::<AppState>().storage_mode.lock() = mode;
+        let handle = serve(app.handle(), TOKEN.to_string(), 0).unwrap();
+        let port = handle.port;
+        let tool_error = |name: &str, args: Value| -> String {
+            let result = rpc(port, "tools/call", json!({ "name": name, "arguments": args }));
+            assert_eq!(result["isError"], true, "{name} should have been refused");
+            result["content"][0]["text"].as_str().unwrap().to_string()
+        };
+
+        // Any type, any case: a folder can't take a note's name.
+        let msg = tool_error("createFolder", json!({ "name": "  APOLLO " }));
+        assert!(msg.contains("already used by a note at the top level"), "{msg}");
+        assert!(tool_error("createNote", json!({ "title": "apollo" })).contains("a note"));
+
+        // The same name one level down is fine.
+        let work = call_tool(port, "createFolder", json!({ "name": "work" }));
+        let inner =
+            call_tool(port, "createNote", json!({ "title": "Apollo", "folderId": work["folderId"] }));
+        let inner_id = inner["documentId"].as_str().unwrap().to_string();
+
+        // Renames onto a taken name are refused; a case-only rename of itself isn't.
+        assert!(tool_error("renameFolder", json!({ "folderId": work["folderId"], "name": "Apollo" }))
+            .contains("a note"));
+        assert!(tool_error("renameNote", json!({ "documentId": apollo, "title": "Work" }))
+            .contains("a folder"));
+        call_tool(port, "renameNote", json!({ "documentId": apollo, "title": "APOLLO" }));
+
+        // Moves (Move to…, and a tree drag) onto a taken name are refused, and
+        // nothing moves.
+        let state = app.state::<AppState>();
+        let err = docs::update_document(state.clone(), inner_id.clone(), None, None, None, Some(true))
+            .err()
+            .expect("move onto a taken name");
+        assert!(err.contains("at the top level"), "{err}");
+        assert!(docs::reorder_documents(state.clone(), None, vec![inner_id.clone(), apollo.clone()]).is_err());
+        let doc = docs::get_document(state.clone(), inner_id).unwrap().unwrap();
+        assert_eq!(doc.folder_id.as_deref(), work["folderId"].as_str());
+
+        // An upload's name is its file stem, so apollo.txt clashes with the note.
+        let src = dir.join("apollo.txt");
+        std::fs::write(&src, "x").unwrap();
+        let err = docs::import_upload(state.clone(), src.to_string_lossy().into(), None, None, None)
+            .err()
+            .expect("upload onto a taken name");
+        assert!(err.contains("a note"), "{err}");
+
+        // The UI's placeholders number themselves instead of failing.
+        let first = docs::create_note(state.clone(), "Untitled note".into(), String::new(), None, Some(true)).unwrap();
+        let second = docs::create_note(state.clone(), "Untitled note".into(), String::new(), None, Some(true)).unwrap();
+        assert_eq!((first.title.as_str(), second.title.as_str()), ("Untitled note", "Untitled note 2"));
+        let folder = docs::create_folder(state.clone(), "work".into(), None, Some(true)).unwrap();
+        assert_eq!(folder.name, "work 2");
+
+        drop(handle);
+    }
+
+    #[test]
+    fn enforces_unique_names_in_database_mode() {
+        enforces_unique_names(&scratch("unique-db"), crate::workspace::StorageMode::Database);
+    }
+
+    #[test]
+    fn enforces_unique_names_in_files_mode() {
+        let dir = scratch("unique-files");
+        enforces_unique_names(&dir, crate::workspace::StorageMode::Files);
+        assert!(dir.join("notes/work/Apollo.md").exists());
+        assert!(dir.join("notes/work 2").is_dir());
     }
 
     #[test]

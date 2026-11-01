@@ -93,7 +93,7 @@ export function DocumentTree({
   );
   const [renaming, setRenaming] = React.useState<RenameRequest | null>(null);
   // Files an import rejected (unsupported type, unreadable) — shown above the tree.
-  const [importError, setImportError] = React.useState<string | null>(null);
+  const [treeError, setTreeError] = React.useState<string | null>(null);
   // Folder an OS file-drag is hovering; null while no drag is over the tree.
   const [fileDrop, setFileDrop] = React.useState<FileDropTarget | null>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -141,8 +141,20 @@ export function DocumentTree({
     });
   }
 
+  /** Runs a tree mutation and shows a refusal — most often a name the
+   *  destination folder already has — rather than dropping it silently. */
+  async function attempt(action: () => Promise<void>) {
+    setTreeError(null);
+    try {
+      await action();
+    } catch (e) {
+      setTreeError(e instanceof Error ? e.message : String(e));
+      onRefresh();
+    }
+  }
+
   async function newFolder(parentId: string | null) {
-    const folder = await createFolder("New folder", parentId);
+    const folder = await createFolder("New folder", parentId, { numberIfTaken: true });
     if (parentId) setExpanded((p) => new Set(p).add(parentId));
     setExpanded((p) => new Set(p).add(folder.id));
     setRenaming({ kind: "folder", id: folder.id });
@@ -155,7 +167,7 @@ export function DocumentTree({
     async (paths: string[], folderId: string | null) => {
       if (paths.length === 0) return;
       const { errors } = await importUploads(paths, folderId);
-      setImportError(errors.length > 0 ? describeImportErrors(errors) : null);
+      setTreeError(errors.length > 0 ? describeImportErrors(errors) : null);
       if (folderId) setExpanded((p) => new Set(p).add(folderId));
       onRefresh();
     },
@@ -186,7 +198,7 @@ export function DocumentTree({
   });
 
   async function newNoteIn(folderId: string | null) {
-    const document = await createNote("Untitled note", "", folderId);
+    const document = await createNote("Untitled note", "", folderId, { numberIfTaken: true });
     if (folderId) setExpanded((p) => new Set(p).add(folderId));
     navigate(`/editor/${document.id}`);
     setRenaming({ kind: "doc", id: document.id });
@@ -294,7 +306,7 @@ export function DocumentTree({
       const payload = drag;
       const spot = drop;
       finish();
-      if (payload && spot) void performDrop(payload, spot);
+      if (payload && spot) void attempt(() => performDrop(payload, spot));
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") finish();
@@ -431,9 +443,11 @@ export function DocumentTree({
               <InlineRename
                 initial={doc.title}
                 onSubmit={async (name) => {
-                  await updateDocument(doc.id, { title: name });
                   setRenaming(null);
-                  onRefresh();
+                  await attempt(async () => {
+                    await updateDocument(doc.id, { title: name });
+                    onRefresh();
+                  });
                 }}
                 onCancel={() => setRenaming(null)}
               />
@@ -467,11 +481,13 @@ export function DocumentTree({
                 <ContextMenuItem
                   key={t.id ?? "root"}
                   disabled={t.id === (doc.folderId ?? null)}
-                  onSelect={async () => {
-                    await moveDocument(doc.id, t.id);
-                    await rebuildFolderContext([doc.id]);
-                    onRefresh();
-                  }}
+                  onSelect={() =>
+                    void attempt(async () => {
+                      await moveDocument(doc.id, t.id);
+                      await rebuildFolderContext([doc.id]);
+                      onRefresh();
+                    })
+                  }
                 >
                   {t.name}
                 </ContextMenuItem>
@@ -561,11 +577,13 @@ export function DocumentTree({
                   initial={folder.name}
                   onSubmit={async (name) => {
                     const affected = docsUnder(folder.id);
-                    await renameFolder(folder.id, name);
                     setRenaming(null);
-                    // The folder's name is a tag on every note beneath it.
-                    await rebuildFolderContext(affected);
-                    onRefresh();
+                    await attempt(async () => {
+                      await renameFolder(folder.id, name);
+                      // The folder's name is a tag on every note beneath it.
+                      await rebuildFolderContext(affected);
+                      onRefresh();
+                    });
                   }}
                   onCancel={() => setRenaming(null)}
                 />
@@ -641,9 +659,9 @@ export function DocumentTree({
           onMouseMove={() => drag && setDropSpot({ kind: "root" })}
           onMouseLeave={() => drag && setDropSpot(null)}
         >
-          {importError && (
+          {treeError && (
             <p className="mb-1 whitespace-pre-wrap rounded-md bg-surface-raised px-2 py-1.5 text-xs text-graph-citation">
-              {importError}
+              {treeError}
             </p>
           )}
           {isEmpty ? (

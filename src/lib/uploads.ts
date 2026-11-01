@@ -2,8 +2,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 
 import { loadSettings } from "@/lib/ai/settings";
 import { enqueueIngest } from "@/lib/ingest/pipeline";
-import { importUpload, importUploadBytes, listDocuments, type UploadTarget } from "@/lib/ipc";
-import type { Doc, PasteImageSettings } from "@/lib/types";
+import {
+  importUpload,
+  importUploadBytes,
+  listDocuments,
+  listFolders,
+  type UploadTarget,
+} from "@/lib/ipc";
+import type { Doc, Folder, PasteImageSettings } from "@/lib/types";
 
 /**
  * Importing files as uploads. Shared by the Import button, the folder context
@@ -182,9 +188,8 @@ export type ResolveConflict = (fileName: string) => Promise<ConflictChoice | nul
 
 const baseName = (doc: Doc) => doc.filePath?.split("/").pop() ?? "";
 
-/** The upload in `folderId` already stored under `fileName`, if any. Uploads
- *  live in `files/<id>/` so nothing collides on disk — this is the logical
- *  collision a user sees in the tree: two "image.png" side by side. */
+/** The upload in `folderId` already stored under `fileName`, if any — the one
+ *  case where Replace makes sense: the same file pasted twice. */
 function duplicateOf(siblings: Doc[], folderId: string | null, fileName: string): Doc | undefined {
   const want = fileName.toLowerCase();
   return siblings.find(
@@ -193,23 +198,41 @@ function duplicateOf(siblings: Doc[], folderId: string | null, fileName: string)
   );
 }
 
+const splitName = (fileName: string) => {
+  const dot = fileName.lastIndexOf(".");
+  return dot > 0
+    ? { stem: fileName.slice(0, dot), ext: fileName.slice(dot) }
+    : { stem: fileName, ext: "" };
+};
+
+const nameKey = (name: string) => name.trim().toLowerCase();
+
+/** Names in use directly inside `folderId`, as keys. Names are unique per
+ *  folder across folders, notes and uploads (an upload's name is its title,
+ *  the stem) — mirrors ensure_name_free in src-tauri/src/commands/docs.rs. */
+function namesIn(docs: Doc[], folders: Folder[], folderId: string | null): Set<string> {
+  return new Set([
+    ...docs.filter((d) => (d.folderId ?? null) === folderId).map((d) => nameKey(d.title)),
+    ...folders.filter((f) => (f.parentId ?? null) === folderId).map((f) => nameKey(f.name)),
+  ]);
+}
+
 /**
  * "Keep both": `image.png` next to an existing `image.png` becomes
  * `image 2.png`; next to `image 2.png` and `image 3.png` it becomes
  * `image 4.png` — one past the highest number the folder already holds.
+ * Any item counts: a note "image 2" takes that number too.
  */
-export function nextAvailableName(siblings: Doc[], folderId: string | null, fileName: string): string {
-  const dot = fileName.lastIndexOf(".");
-  const stem = dot > 0 ? fileName.slice(0, dot) : fileName;
-  const ext = dot > 0 ? fileName.slice(dot) : "";
-  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const numbered = new RegExp(`^${escape(stem)}(?: (\\d+))?${escape(ext)}$`, "i");
+export function nextAvailableName(taken: Set<string>, fileName: string): string {
+  const { stem, ext } = splitName(fileName);
+  const key = nameKey(stem);
   let last = 0;
-  for (const d of siblings) {
-    if (d.kind !== "upload" || (d.folderId ?? null) !== folderId) continue;
-    const m = numbered.exec(baseName(d));
-    if (!m) continue;
-    last = Math.max(last, m[1] ? Number(m[1]) : 1);
+  for (const name of taken) {
+    if (name === key) last = Math.max(last, 1);
+    else if (name.startsWith(`${key} `)) {
+      const n = name.slice(key.length + 1);
+      if (/^\d+$/.test(n)) last = Math.max(last, Number(n));
+    }
   }
   return `${stem} ${last + 1}${ext}`;
 }
@@ -231,7 +254,8 @@ export async function importPasted(
   const { pasteImages } = await loadSettings();
   // Fetched once; docs this paste creates are appended so two files in one
   // paste with the same name collide with each other too.
-  const siblings = await listDocuments();
+  const [siblings, folders] = await Promise.all([listDocuments(), listFolders()]);
+  const taken = namesIn(siblings, folders, folderId);
 
   const incoming: { name: string; store: (target: UploadTarget) => Promise<Doc> }[] = [
     ...pasted.paths.map((path) => ({
@@ -255,9 +279,15 @@ export async function importPasted(
         target =
           choice === "replace"
             ? { replaceId: existing.id }
-            : { folderId, fileName: nextAvailableName(siblings, folderId, name) };
+            : { folderId, fileName: nextAvailableName(taken, name) };
+      } else if (taken.has(nameKey(splitName(name).stem))) {
+        // The name is held by something Replace can't overwrite — a note, a
+        // folder, or an upload of another type ("report.pdf" vs "report.docx"
+        // are both "report"). Keep both is the only option, so don't ask.
+        target = { folderId, fileName: nextAvailableName(taken, name) };
       }
       const doc = await store(target);
+      taken.add(nameKey(doc.title));
       enqueueIngest(doc.id);
       out.docs.push(doc);
       if (existing && "replaceId" in target) {

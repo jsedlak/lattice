@@ -43,8 +43,19 @@ export const listDocuments = (kind?: DocumentKind) =>
 
 export const getDocument = (id: string) => invoke<Doc | null>("get_document", { id });
 
-export const createNote = (title: string, content = "", folderId: string | null = null) =>
-  invoke<Doc>("create_note", { title, content, folderId });
+/** Names are unique per folder (folders, notes and uploads, ignoring case); a
+ *  taken one is refused. `numberIfTaken` is for placeholders ("Untitled note")
+ *  — it takes "Untitled note 2" instead of failing. */
+export interface CreateOptions {
+  numberIfTaken?: boolean;
+}
+
+export const createNote = (
+  title: string,
+  content = "",
+  folderId: string | null = null,
+  { numberIfTaken = false }: CreateOptions = {},
+) => invoke<Doc>("create_note", { title, content, folderId, numberIfTaken });
 
 export interface DocumentPatch {
   title?: string;
@@ -69,8 +80,11 @@ export const setDocumentIngest = (id: string, status: IngestStatus, error: strin
 // ── Folders ──────────────────────────────────────────────────────────────────
 
 export const listFolders = () => invoke<Folder[]>("list_folders");
-export const createFolder = (name: string, parentId: string | null = null) =>
-  invoke<Folder>("create_folder", { name, parentId });
+export const createFolder = (
+  name: string,
+  parentId: string | null = null,
+  { numberIfTaken = false }: CreateOptions = {},
+) => invoke<Folder>("create_folder", { name, parentId, numberIfTaken });
 export const renameFolder = (id: string, name: string) =>
   invoke<void>("rename_folder", { id, name });
 export const deleteFolder = (id: string) => invoke<void>("delete_folder", { id });

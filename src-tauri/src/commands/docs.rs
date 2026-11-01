@@ -83,7 +83,11 @@ pub fn list_documents(state: State<AppState>, kind: Option<String>) -> CmdResult
 
 #[tauri::command]
 pub fn get_document(state: State<AppState>, id: String) -> CmdResult<Option<Doc>> {
-    let mut doc = get_doc(&state.db.lock(), &id).map_err(err)?;
+    read_document(&state.db.lock(), &state, &id)
+}
+
+fn read_document(conn: &Connection, state: &AppState, id: &str) -> CmdResult<Option<Doc>> {
+    let mut doc = get_doc(conn, id).map_err(err)?;
     // Files mode: the .md file is canonical — serve it, but do NOT refresh the
     // db cache; a stale cache is how sync_workspace detects external edits.
     if state.files_mode() {
@@ -112,15 +116,124 @@ pub fn find_document_by_title(state: State<AppState>, title: String) -> CmdResul
     .map_err(err)
 }
 
+// ── Unique names ─────────────────────────────────────────────────────────────
+//
+// No two items directly inside the same folder (or both at the top level) may
+// share a name: folders, notes and uploads alike, trimmed and ignoring case.
+// Notes and uploads are [[wikilink]] targets resolved by title, and a tree with
+// two "Apollo"s is one nobody can navigate. Enforced here, under the db lock,
+// so the UI and MCP get the same rule. An upload's name is its title — the
+// file stem the tree shows. Existing duplicates are left alone; only creates,
+// renames and moves are checked.
+
+fn name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// What already holds `name` directly inside `parent` (None = top level),
+/// ignoring `exclude` — the item being renamed or moved.
+fn name_holder(
+    conn: &Connection,
+    parent: Option<&str>,
+    name: &str,
+    exclude: Option<&str>,
+) -> CmdResult<Option<&'static str>> {
+    let key = name_key(name);
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, 'folder' FROM folder WHERE parent_id IS ?1
+             UNION ALL
+             SELECT id, title, kind FROM document WHERE folder_id IS ?1",
+        )
+        .map_err(err)?;
+    let rows = stmt
+        .query_map([parent], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+        .map_err(err)?;
+    for row in rows {
+        let (id, existing, kind) = row.map_err(err)?;
+        if Some(id.as_str()) != exclude && name_key(&existing) == key {
+            return Ok(Some(match kind.as_str() {
+                "folder" => "a folder",
+                "upload" => "an upload",
+                _ => "a note",
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Refuses `name` if a sibling already has it. The message is user-facing:
+/// the tree, the editor and MCP agents all show it as-is.
+pub(crate) fn ensure_name_free(
+    conn: &Connection,
+    parent: Option<&str>,
+    name: &str,
+    exclude: Option<&str>,
+) -> CmdResult<()> {
+    match name_holder(conn, parent, name, exclude)? {
+        None => Ok(()),
+        Some(holder) => Err(format!(
+            "\"{}\" is already used by {holder} {}",
+            name.trim(),
+            if parent.is_some() { "in this folder" } else { "at the top level" },
+        )),
+    }
+}
+
+/// `base`, or the first of "base 2", "base 3", … that's free — for the
+/// "Untitled note" / "New folder" placeholders, which shouldn't fail.
+fn numbered_free_name(conn: &Connection, parent: Option<&str>, base: &str) -> CmdResult<String> {
+    if name_holder(conn, parent, base, None)?.is_none() {
+        return Ok(base.to_string());
+    }
+    for n in 2.. {
+        let candidate = format!("{base} {n}");
+        if name_holder(conn, parent, &candidate, None)?.is_none() {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("an unbounded range always yields a free name")
+}
+
+/// The name a note or folder will actually be stored under: files mode
+/// sanitizes it into a filename, so that's the name to check.
+fn stored_name(state: &AppState, name: &str) -> String {
+    if state.files_mode() {
+        workspace::sanitize_stem(name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// Checks `name` for a new note or folder in `parent`, or with `number_if_taken`
+/// picks the next free numbered variant instead of failing.
+fn claim_name(
+    conn: &Connection,
+    state: &AppState,
+    parent: Option<&str>,
+    name: &str,
+    number_if_taken: Option<bool>,
+) -> CmdResult<String> {
+    let name = stored_name(state, name);
+    if number_if_taken.unwrap_or(false) {
+        numbered_free_name(conn, parent, &name)
+    } else {
+        ensure_name_free(conn, parent, &name, None)?;
+        Ok(name)
+    }
+}
+
 #[tauri::command]
 pub fn create_note(
     state: State<AppState>,
     title: String,
     content: String,
     folder_id: Option<String>,
+    number_if_taken: Option<bool>,
 ) -> CmdResult<Doc> {
     let conn = state.db.lock();
     let (id, ts) = (new_id(), now());
+    let title = claim_name(&conn, &state, folder_id.as_deref(), &title, number_if_taken)?;
     // Files mode: disk first — the file is canonical, the row is the index.
     let (title, file_path) = if state.files_mode() {
         let (stem, rel) =
@@ -151,12 +264,57 @@ pub fn update_document(
     clear_folder: Option<bool>,
 ) -> CmdResult<Doc> {
     let conn = state.db.lock();
-    let existing = get_doc(&conn, &id).map_err(err)?.ok_or("document not found")?;
+    update_document_in(&conn, &state, id, title, content, folder_id, clear_folder)
+}
+
+/// Read-modify-write of a note's text under ONE db lock: the read and the
+/// write can't interleave with another save (the editor's autosave, a parallel
+/// MCP call), so an edit computed from stale text can't silently clobber one
+/// that landed in between. `edit` gets the canonical text (disk, in files
+/// mode). Returns the saved doc, or None when the edit changed nothing.
+pub(crate) fn edit_note(
+    state: &AppState,
+    id: &str,
+    edit: impl FnOnce(&str) -> CmdResult<String>,
+) -> CmdResult<Option<Doc>> {
+    let conn = state.db.lock();
+    let doc = read_document(&conn, state, id)?.ok_or_else(|| format!("no document with id {id}"))?;
+    if doc.kind != "note" {
+        return Err("that document is an uploaded file; only notes can be edited".into());
+    }
+    let new_content = edit(&doc.content)?;
+    if new_content == doc.content {
+        return Ok(None);
+    }
+    update_document_in(&conn, state, id.to_string(), None, Some(new_content), None, None).map(Some)
+}
+
+fn update_document_in(
+    conn: &Connection,
+    state: &AppState,
+    id: String,
+    title: Option<String>,
+    content: Option<String>,
+    folder_id: Option<String>,
+    clear_folder: Option<bool>,
+) -> CmdResult<Doc> {
+    let existing = get_doc(conn, &id).map_err(err)?.ok_or("document not found")?;
     let new_folder = if clear_folder.unwrap_or(false) {
         None
     } else {
         folder_id.or(existing.folder_id.clone())
     };
+    // A rename or move must land on a free name — checked before anything
+    // (row or file) changes.
+    if let Some(t) = &title {
+        let moved = new_folder != existing.folder_id;
+        if moved || t != &existing.title {
+            let name = if existing.kind == "note" { stored_name(state, t) } else { t.clone() };
+            ensure_name_free(conn, new_folder.as_deref(), &name, Some(&id))?;
+        }
+    } else if new_folder != existing.folder_id {
+        ensure_name_free(conn, new_folder.as_deref(), &existing.title, Some(&id))?;
+    }
     // Moving between folders appends to the destination's manual order.
     if new_folder != existing.folder_id {
         conn.execute(
@@ -182,7 +340,7 @@ pub fn update_document(
             None => {
                 // Self-heal a row that never got a file.
                 let (stem, rel) =
-                    workspace::place_note(&conn, ws, new_folder.as_deref(), &new_title, None)?;
+                    workspace::place_note(conn, ws, new_folder.as_deref(), &new_title, None)?;
                 fs::write(ws.join(&rel), &new_content).map_err(err)?;
                 new_title = stem;
                 new_file_path = Some(rel);
@@ -191,7 +349,7 @@ pub fn update_document(
                 let cur_abs = ws.join(cur_rel);
                 if new_folder != existing.folder_id || new_title != existing.title {
                     let (stem, rel) = workspace::place_note(
-                        &conn,
+                        conn,
                         ws,
                         new_folder.as_deref(),
                         &new_title,
@@ -215,7 +373,7 @@ pub fn update_document(
         params![id, new_title, new_content, new_folder, new_file_path, now()],
     )
     .map_err(err)?;
-    get_doc(&conn, &id).map_err(err)?.ok_or_else(|| "not found".into())
+    get_doc(conn, &id).map_err(err)?.ok_or_else(|| "not found".into())
 }
 
 #[tauri::command]
@@ -323,9 +481,11 @@ pub fn create_folder(
     state: State<AppState>,
     name: String,
     parent_id: Option<String>,
+    number_if_taken: Option<bool>,
 ) -> CmdResult<Folder> {
     let conn = state.db.lock();
     let (id, ts) = (new_id(), now());
+    let name = claim_name(&conn, &state, parent_id.as_deref(), &name, number_if_taken)?;
     // Files mode: the directory is the folder — create it first, letting
     // sanitize/dedupe settle the name that actually sticks.
     let name = if state.files_mode() {
@@ -362,6 +522,22 @@ pub fn reorder_documents(
     ids: Vec<String>,
 ) -> CmdResult<()> {
     let conn = state.db.lock();
+    // A drag into another folder must land on a free name. Checked for every
+    // id before any file moves: an error mid-loop would roll back the rows but
+    // not the renames already done on disk.
+    for id in &ids {
+        let row: Option<(String, Option<String>)> = conn
+            .query_row("SELECT title, folder_id FROM document WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(err)?;
+        if let Some((title, cur)) = row {
+            if cur != folder_id {
+                ensure_name_free(&conn, folder_id.as_deref(), &title, Some(id))?;
+            }
+        }
+    }
     let tx = conn.unchecked_transaction().map_err(err)?;
     for (i, id) in ids.iter().enumerate() {
         // A drag between folders arrives here (not update_document) — in
@@ -410,6 +586,20 @@ pub fn reorder_folders(
     ids: Vec<String>,
 ) -> CmdResult<()> {
     let conn = state.db.lock();
+    // Same pre-check as reorder_documents, for a folder dragged into a new parent.
+    for id in &ids {
+        let row: Option<(String, Option<String>)> = conn
+            .query_row("SELECT name, parent_id FROM folder WHERE id = ?1", [id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(err)?;
+        if let Some((name, cur)) = row {
+            if cur != parent_id {
+                ensure_name_free(&conn, parent_id.as_deref(), &name, Some(id))?;
+            }
+        }
+    }
     let tx = conn.unchecked_transaction().map_err(err)?;
     for (i, id) in ids.iter().enumerate() {
         // Re-parenting a folder moves its directory (and every descendant's
@@ -456,11 +646,12 @@ pub fn reorder_folders(
 #[tauri::command]
 pub fn rename_folder(state: State<AppState>, id: String, name: String) -> CmdResult<()> {
     let conn = state.db.lock();
+    let parent_id: Option<String> = conn
+        .query_row("SELECT parent_id FROM folder WHERE id = ?1", [&id], |r| r.get(0))
+        .map_err(err)?;
+    ensure_name_free(&conn, parent_id.as_deref(), &stored_name(&state, &name), Some(&id))?;
     if state.files_mode() {
         let ws = &state.workspace_dir;
-        let parent_id: Option<String> = conn
-            .query_row("SELECT parent_id FROM folder WHERE id = ?1", [&id], |r| r.get(0))
-            .map_err(err)?;
         let old_rel = workspace::folder_rel_dir(&conn, Some(&id))?;
         let parent_rel = workspace::folder_rel_dir(&conn, parent_id.as_deref())?;
         let old_abs = ws.join(&old_rel);
@@ -490,7 +681,7 @@ pub fn rename_folder(state: State<AppState>, id: String, name: String) -> CmdRes
 
 /// `root` plus every folder beneath it, parents before children. folder.parent_id
 /// has no FK, so a subtree delete has to walk the tree itself.
-fn folder_subtree_ids(conn: &Connection, root: &str) -> CmdResult<Vec<String>> {
+pub(crate) fn folder_subtree_ids(conn: &Connection, root: &str) -> CmdResult<Vec<String>> {
     let mut ids = vec![root.to_string()];
     let mut i = 0;
     while i < ids.len() {
@@ -592,7 +783,12 @@ fn store_upload(
         .unwrap_or(file_name)
         .to_string();
     let (id, previous) = match &target {
-        Target::New { .. } => (new_id(), None),
+        Target::New { folder_id } => {
+            // Before any bytes are written. Replace keeps the existing upload's
+            // name, so only a new one is checked.
+            ensure_name_free(&state.db.lock(), folder_id.as_deref(), &title, None)?;
+            (new_id(), None)
+        }
         Target::Replace { id } => {
             let conn = state.db.lock();
             let doc = get_doc(&conn, id).map_err(err)?.ok_or("document not found")?;

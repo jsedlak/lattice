@@ -17,9 +17,11 @@ import {
 import { Onboarding } from "@/components/onboarding/Onboarding";
 import { ConfirmProvider, Logo, LogoMark, ResizeHandle } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { rebuildFolderContext } from "@/lib/graph-build";
 import { enqueueIngest, resumePendingIngest } from "@/lib/ingest/pipeline";
 import { getSettings, getWorkspaceInfo, listDocuments, syncWorkspace } from "@/lib/ipc";
 import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
+import { useMcpDocumentsChanged } from "@/lib/mcp-events";
 import type { Doc } from "@/lib/types";
 
 const NAV = [
@@ -39,6 +41,7 @@ const ZOOM_MAX = 2;
 export function Shell() {
   const location = useLocation();
   const [recent, setRecent] = useState<Doc[]>([]);
+  const [mcpWrites, setMcpWrites] = useState(0);
   const [collapsed, setCollapsed] = useState(() => layoutBootCache().sidebarCollapsed);
   const [width, setWidth] = useState(() => layoutBootCache().sidebarWidth);
   const [resizing, setResizing] = useState(false);
@@ -124,8 +127,17 @@ export function Shell() {
     })();
   }, []);
 
+  // MCP writes: do the graph upkeep here, since Shell is always mounted (the
+  // editor may not be) — the same work the tree and editor do after their own
+  // edits — and surface the result in Recent.
+  useMcpDocumentsChanged(({ ingest, rebuild }) => {
+    for (const id of ingest) enqueueIngest(id);
+    void rebuildFolderContext(rebuild).then(() => setMcpWrites((n) => n + 1));
+  });
+
   // Refresh the Recent list on every navigation — edits elsewhere bump
-  // updated_at, and navigation is when the list can go stale.
+  // updated_at, and navigation is when the list can go stale — and after
+  // MCP writes, which arrive without a navigation.
   useEffect(() => {
     void listDocuments().then((docs) =>
       setRecent(
@@ -135,7 +147,7 @@ export function Shell() {
           .slice(0, RECENT_COUNT),
       ),
     );
-  }, [location.key]);
+  }, [location.key, mcpWrites]);
 
   return (
     <ConfirmProvider>

@@ -11,6 +11,7 @@ import { ResizeHandle, Spinner } from "@/components/ui";
 import { findDocumentByTitle, getDocument, listDocuments, listFolders } from "@/lib/ipc";
 import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
 import { invalidateCompletionCaches } from "@/lib/completions";
+import { useMcpDocumentsChanged } from "@/lib/mcp-events";
 import { closeTab, openTab, pruneTabs, useOpenTabIds } from "@/lib/open-tabs";
 import type { Doc, Folder } from "@/lib/types";
 
@@ -57,6 +58,10 @@ export function EditorScreen() {
   React.useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // MCP writes bypass this screen; Shell does their graph upkeep, this shows
+  // them (an open EditorPane reloads edited text itself).
+  useMcpDocumentsChanged(() => void refresh());
 
   // Resolve the selected document. Re-runs after every refresh() so the
   // selection tracks renames, deletions and ingest-status changes.

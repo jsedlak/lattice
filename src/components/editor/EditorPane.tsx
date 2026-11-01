@@ -13,7 +13,8 @@ import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-
 import { latticeEditorExtensions } from "@/lib/codemirror-lattice";
 import { buildDeterministic } from "@/lib/graph-build";
 import { enqueueIngest } from "@/lib/ingest/pipeline";
-import { updateDocument } from "@/lib/ipc";
+import { getDocument, updateDocument } from "@/lib/ipc";
+import { useMcpDocumentsChanged } from "@/lib/mcp-events";
 import {
   type ConflictChoice,
   describeImportErrors,
@@ -35,6 +36,8 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
   const { resolvedTheme } = useTheme();
   const choose = useChoose();
   const [title, setTitle] = React.useState(doc.title);
+  // Why the typed title didn't stick — another item in this folder has it.
+  const [titleError, setTitleError] = React.useState<string | null>(null);
   const [content, setContent] = React.useState(doc.content);
   const [save, setSave] = React.useState<SaveState>("idle");
   const [showPreview, setShowPreview] = React.useState(true);
@@ -72,16 +75,65 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
   React.useEffect(() => {
     if (pending.current.title === undefined) {
       setTitle(doc.title);
+      setTitleError(null);
       lastRefreshedTitle.current = doc.title;
     }
   }, [doc.title]);
+
+  // Saves currently awaiting the backend. Nonzero means disk is about to
+  // change under us, so it's not safe to adopt an external edit.
+  const inFlight = React.useRef(0);
+  // Bumped to remount the editor engine with new text — Monaco is
+  // uncontrolled, so changing `value` alone wouldn't show it.
+  const [engineKey, setEngineKey] = React.useState(0);
+  const contentRef = React.useRef(content);
+  contentRef.current = content;
+
+  // An MCP agent edited this note and the pane hasn't shown it yet. Stays set
+  // until it's safe to look: dropping an edit that arrives mid-save would leave
+  // stale text on screen for the next keystroke to save over the agent's work.
+  const agentEdit = React.useRef(false);
+  const canAdopt = () => pending.current.content === undefined && inFlight.current === 0;
+  const adoptAgentEdit = React.useCallback(() => {
+    if (!agentEdit.current || !canAdopt()) return;
+    agentEdit.current = false;
+    void getDocument(doc.id).then((fresh) => {
+      if (!fresh) return;
+      // Typing started while we read: the user's save is about to land, and
+      // their text wins (it's their editor). Look again once it has — disk will
+      // then match the screen and this is a no-op.
+      if (!canAdopt()) {
+        agentEdit.current = true;
+        return;
+      }
+      if (fresh.content === contentRef.current) return;
+      setContent(fresh.content);
+      setEngineKey((k) => k + 1);
+    });
+  }, [doc.id]);
 
   const persist = React.useCallback(
     async (patch: { title?: string; content?: string }) => {
       if (patch.title === undefined && patch.content === undefined) return;
       setSave("saving");
+      inFlight.current += 1;
       try {
-        const saved = await updateDocument(doc.id, patch);
+        let saved: Doc;
+        try {
+          saved = await updateDocument(doc.id, patch);
+          if (patch.title !== undefined) setTitleError(null);
+        } catch (e) {
+          // A title can be refused (names are unique per folder). Say so, and
+          // don't let it sink content that rode along in the same save.
+          if (patch.title === undefined) throw e;
+          setTitleError(e instanceof Error ? e.message : String(e));
+          patch = { content: patch.content };
+          if (patch.content === undefined) {
+            setSave("idle");
+            return;
+          }
+          saved = await updateDocument(doc.id, patch);
+        }
         setSave("saved");
         // Files-mode workspaces may adjust the title to a usable, unique
         // filename — adopt what actually stuck.
@@ -107,10 +159,20 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         }
       } catch {
         setSave("idle");
+      } finally {
+        inFlight.current -= 1;
+        // An agent edit that arrived mid-save was deferred until now.
+        adoptAgentEdit();
       }
     },
-    [doc.id, onRefresh],
+    [doc.id, onRefresh, adoptAgentEdit],
   );
+
+  useMcpDocumentsChanged(({ edited }) => {
+    if (!edited.includes(doc.id)) return;
+    agentEdit.current = true;
+    adoptAgentEdit();
+  });
 
   const scheduleSave = React.useCallback(
     (patch: { title?: string; content?: string }) => {
@@ -233,7 +295,13 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
           }}
           className="min-w-0 flex-1 truncate bg-transparent  font-medium focus:outline-none"
           aria-label="Document title"
+          aria-invalid={titleError !== null}
         />
+        {titleError && (
+          <span className="max-w-[50%] truncate text-xs text-graph-citation" title={titleError}>
+            {titleError}
+          </span>
+        )}
         <SaveIndicator state={save} />
         {uploading && (
           <span className="flex items-center gap-1  text-faint">
@@ -283,6 +351,7 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
         >
             {editorChoice === "codemirror" ? (
               <CodeMirror
+                key={engineKey}
                 ref={cmRef}
                 value={content}
                 height="100%"
@@ -302,6 +371,7 @@ export function EditorPane({ doc, onRefresh }: { doc: Doc; onRefresh: () => void
               />
             ) : editorChoice === "monaco" ? (
               <MonacoMarkdown
+                key={engineKey}
                 value={content}
                 theme={resolvedTheme}
                 className="absolute inset-0 pl-1 pt-1"

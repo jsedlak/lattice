@@ -6,11 +6,16 @@
 //! descriptions from `src/lib/ai/tools.ts` so behavior matches the in-app
 //! assistant; `getDocument`, `getSubgraph`, and `listDocuments` are additions
 //! that an external agent needs and the in-app assistant got from the UI.
+//! `listFolders`, `createFolder`, `createNote`, `editNote`, `renameNote`, and
+//! `renameFolder` are the write side. There is deliberately no delete: the
+//! worst an agent can do is overwrite a note's text, never remove one.
+
+use std::collections::HashMap;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
-use crate::commands::{docs, graph, settings};
+use crate::commands::{chat, docs, graph, settings};
 use crate::embedding;
 use crate::AppState;
 
@@ -22,6 +27,21 @@ const PREVIEW_CHARS: usize = 160;
 /// back and say so, rather than silently returning a truncated neighborhood.
 const MAX_SUBGRAPH_NODES: usize = 200;
 const MAX_LISTED_DOCUMENTS: usize = 500;
+
+/// Emitted after an MCP write so the webview can catch up — the pipeline
+/// (chunk, embed, extract) lives in TypeScript, and the Rust core never calls
+/// a model. Payload (see `changed`): documents to `ingest` (new or edited
+/// text), documents whose text was `edited` (an open editor must reload them),
+/// and documents to `rebuild` (title or folder path changed, content didn't —
+/// only the cheap deterministic graph needs redoing, as after a tree rename).
+pub const CHANGED_EVENT: &str = "mcp-documents-changed";
+
+fn changed<R: Runtime>(app: &AppHandle<R>, ingest: &[&str], edited: &[&str], rebuild: &[String]) {
+    let _ = app.emit(
+        CHANGED_EVENT,
+        json!({ "ingest": ingest, "edited": edited, "rebuild": rebuild }),
+    );
+}
 
 /// Sent with `initialize`. Over IPC the assistant gets this vocabulary from its
 /// system prompt; an MCP client has no system prompt, so without this the tools
@@ -57,7 +77,31 @@ useful than several getNeighbors calls.
 between two nodes.
   - Prefer citing note titles the user will recognize over node ids.
 
-This server is read-only: it cannot create or modify notes."
+Writing:
+  - createNote adds a markdown note; createFolder adds a folder. Call \
+listFolders first to find a folderId, and to reuse an existing folder rather \
+than creating a near-duplicate. Folder names become tags on the notes inside \
+them, so choose them as you would a tag.
+  - Note content is markdown. [[Wikilinks]] to other note titles and inline \
+#tags become graph edges once the note is ingested.
+  - A new note is indexed in the background (chunked, embedded, entities \
+extracted), so it may not show up in semanticSearch or the graph for a few \
+seconds; getDocument works immediately.
+  - editNote changes a note's text. Prefer `edits` (exact find-and-replace, \
+each oldText must match exactly once) over `content`, which replaces the whole \
+note — read it with getDocument first either way. If the user has the note \
+open with unsaved typing, their text wins.
+  - renameNote and renameFolder change names only. A rename does NOT update \
+[[wikilinks]] in other notes; links to the old title stop resolving, so fix \
+them with editNote if they matter. Renaming a folder changes the tag on every \
+note inside it.
+  - Names are unique per folder: no two folders, notes or uploads directly \
+inside the same folder (or both at the top level) may share a name, ignoring \
+case. Creating, renaming or moving onto a taken name fails with an error \
+naming what holds it — pick another name, or reuse the existing item.
+  - Nothing can be deleted through this server. In a files-mode workspace a \
+name with characters a filename can't hold is cleaned up, so use the name in \
+the response."
     )
 }
 
@@ -141,6 +185,95 @@ pub fn definitions() -> Vec<Value> {
                 },
             },
         }),
+        json!({
+            "name": "listFolders",
+            "description": "List folders with their ids and full paths (e.g. work/projects). Use to find a folderId for createNote or a parentId for createFolder. Lists one level by default — the top level, or the folders directly inside parentId; pass recursive: true for everything beneath, in tree order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parentId": { "type": "string", "description": "List inside this folder. Omit for the top level." },
+                    "recursive": { "type": "boolean", "default": false, "description": "Include subfolders at every depth, not just direct children." },
+                },
+            },
+        }),
+        json!({
+            "name": "createFolder",
+            "description": "Create a folder, at the top level or inside another folder. Returns the new folderId.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Folder name. Becomes a tag on every note inside it." },
+                    "parentId": { "type": "string", "description": "folderId to create it inside (from listFolders). Omit for the top level." },
+                },
+                "required": ["name"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false },
+        }),
+        json!({
+            "name": "createNote",
+            "description": "Create a markdown note, optionally inside a folder. It is indexed into the graph in the background. Returns the new documentId and the title as stored.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "content": { "type": "string", "description": "Markdown body. [[Wikilinks]] and #tags become graph edges.", "default": "" },
+                    "folderId": { "type": "string", "description": "folderId to create it in (from listFolders or createFolder). Omit for the top level." },
+                },
+                "required": ["title"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false },
+        }),
+        json!({
+            "name": "editNote",
+            "description": "Change a note's text. Pass either `edits` (preferred: exact find-and-replace pairs, applied in order, each oldText matching exactly once) or `content` (replaces the whole note). Read the note with getDocument first. All-or-nothing: if any edit fails to match, nothing is changed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "documentId": { "type": "string" },
+                    "edits": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldText": { "type": "string", "description": "Exact text to find, including whitespace. Must occur exactly once — include surrounding context to make it unique." },
+                                "newText": { "type": "string" },
+                            },
+                            "required": ["oldText", "newText"],
+                        },
+                    },
+                    "content": { "type": "string", "description": "The note's complete new markdown. Use instead of edits only for a rewrite." },
+                },
+                "required": ["documentId"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false },
+        }),
+        json!({
+            "name": "renameNote",
+            "description": "Rename a note (or uploaded file). Does not update [[wikilinks]] to the old title in other notes. Returns the title as stored.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "documentId": { "type": "string" },
+                    "title": { "type": "string" },
+                },
+                "required": ["documentId", "title"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true },
+        }),
+        json!({
+            "name": "renameFolder",
+            "description": "Rename a folder. The folder name is a tag on every note inside it, so this retags them. Returns the name and path as stored.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "folderId": { "type": "string" },
+                    "name": { "type": "string" },
+                },
+                "required": ["folderId", "name"],
+            },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true },
+        }),
     ]
 }
 
@@ -155,6 +288,15 @@ fn required_str(args: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing required argument: {key}"))
 }
 
+/// An optional id argument: absent, null, and blank all mean "none".
+fn optional_str(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
 fn optional_u32(args: &Value, key: &str) -> Option<u32> {
     args.get(key).and_then(Value::as_u64).map(|v| v as u32)
 }
@@ -165,6 +307,108 @@ fn truncate(text: &str, max: usize) -> String {
         Some((byte, _)) => format!("{}…", &text[..byte]),
         None => text.to_string(),
     }
+}
+
+// ── Folders ──────────────────────────────────────────────────────────────────
+
+/// Every folder's slash-joined path from the root, keyed by id. Folder names
+/// alone are ambiguous (two "notes" folders under different parents), and the
+/// path is how a user would describe where something lives.
+fn folder_paths(folders: &[docs::Folder]) -> HashMap<String, String> {
+    let by_id: HashMap<&str, &docs::Folder> = folders.iter().map(|f| (f.id.as_str(), f)).collect();
+    folders
+        .iter()
+        .map(|f| {
+            let mut parts = vec![f.name.as_str()];
+            let mut cursor = f.parent_id.as_deref();
+            // Bounded by the folder count, so a corrupt cycle can't spin forever.
+            while let Some(parent) = cursor.and_then(|id| by_id.get(id)) {
+                if parts.len() > folders.len() {
+                    break;
+                }
+                parts.push(parent.name.as_str());
+                cursor = parent.parent_id.as_deref();
+            }
+            parts.reverse();
+            (f.id.clone(), parts.join("/"))
+        })
+        .collect()
+}
+
+/// The folders under `root` (None = top level) in the sidebar's order: each
+/// level by its manual sort_order, as list_folders returns it, and with
+/// `recursive`, depth-first so every folder is followed by its own subtree. A
+/// sort on the path string can't do this — "work notes" sorts between "work"
+/// and "work/projects", because ' ' < '/'.
+fn folder_tree<'a>(folders: &'a [docs::Folder], root: Option<&str>, recursive: bool) -> Vec<&'a docs::Folder> {
+    let mut out = Vec::new();
+    // Explicit stack rather than recursion; `seen` keeps a corrupt parent cycle
+    // from looping forever.
+    let mut seen = std::collections::HashSet::new();
+    // Reversed so the stack pops them in order.
+    let children = |parent: Option<&str>| -> Vec<&'a docs::Folder> {
+        folders.iter().filter(|f| f.parent_id.as_deref() == parent).rev().collect()
+    };
+    let mut stack = children(root);
+    while let Some(folder) = stack.pop() {
+        if !seen.insert(folder.id.as_str()) {
+            continue;
+        }
+        out.push(folder);
+        if recursive {
+            stack.extend(children(Some(&folder.id)));
+        }
+    }
+    out
+}
+
+/// `create_note`/`create_folder` trust their caller (the tree only offers real
+/// folders); an agent can pass anything, and there is no FK on folder ids, so
+/// a typo would otherwise strand a note in a folder that doesn't exist.
+fn require_folder<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    let found = docs::list_folders(app.state())?.iter().any(|f| f.id == id);
+    if found {
+        Ok(())
+    } else {
+        Err(format!("no folder with id {id} — call listFolders for valid ids"))
+    }
+}
+
+// ── Note edits ───────────────────────────────────────────────────────────────
+
+/// Applies find-and-replace edits in order, all or nothing. Exactly-once
+/// matching is the point: a replace-all on an ambiguous snippet is how an agent
+/// edits the wrong paragraph without noticing.
+fn apply_edits(content: &str, edits: &[Value]) -> Result<String, String> {
+    let mut out = content.to_string();
+    for (i, edit) in edits.iter().enumerate() {
+        let n = i + 1;
+        let old = edit
+            .get("oldText")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("edit {n}: oldText is missing or empty"))?;
+        let new = edit
+            .get("newText")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("edit {n}: newText is missing"))?;
+        match out.match_indices(old).count() {
+            1 => out = out.replacen(old, new, 1),
+            0 => {
+                return Err(format!(
+                    "edit {n}: oldText not found (it must match exactly, whitespace included; \
+                     earlier edits in this call are already applied when matching). Nothing was changed."
+                ))
+            }
+            count => {
+                return Err(format!(
+                    "edit {n}: oldText occurs {count} times — include more surrounding text so it \
+                     matches once. Nothing was changed."
+                ))
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ── Query embedding ──────────────────────────────────────────────────────────
@@ -373,6 +617,132 @@ pub fn call<R: Runtime>(app: &AppHandle<R>, name: &str, args: &Value) -> Result<
             Ok(json!({ "total": total, "returned": listed.len(), "documents": listed }))
         }
 
+        "listFolders" => {
+            let parent_id = optional_str(args, "parentId");
+            if let Some(id) = &parent_id {
+                require_folder(app, id)?;
+            }
+            let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(false);
+            let folders = docs::list_folders(app.state())?;
+            let paths = folder_paths(&folders);
+            let listed: Vec<Value> = folder_tree(&folders, parent_id.as_deref(), recursive)
+                .into_iter()
+                .map(|f| json!({
+                    "folderId": f.id,
+                    "name": f.name,
+                    "parentId": f.parent_id,
+                    "path": paths[&f.id],
+                    "childFolders": folders.iter().filter(|c| c.parent_id.as_deref() == Some(&f.id)).count(),
+                }))
+                .collect();
+            Ok(json!({ "folders": listed }))
+        }
+
+        "createFolder" => {
+            let name = required_str(args, "name")?;
+            let parent_id = optional_str(args, "parentId");
+            if let Some(id) = &parent_id {
+                require_folder(app, id)?;
+            }
+            let folder = docs::create_folder(app.state(), name, parent_id, None)?;
+            changed(app, &[], &[], &[]);
+            let paths = folder_paths(&docs::list_folders(app.state())?);
+            Ok(json!({
+                "folderId": folder.id,
+                "name": folder.name,
+                "parentId": folder.parent_id,
+                "path": paths.get(&folder.id),
+            }))
+        }
+
+        "createNote" => {
+            let title = required_str(args, "title")?;
+            let content = args.get("content").and_then(Value::as_str).unwrap_or("").to_string();
+            let folder_id = optional_str(args, "folderId");
+            if let Some(id) = &folder_id {
+                require_folder(app, id)?;
+            }
+            let doc = docs::create_note(app.state(), title, content, folder_id, None)?;
+            // Queue it durably before telling the webview: if the app is closed
+            // or the event is missed, resumePendingIngest picks it up at launch.
+            chat::upsert_ingest_job(app.state(), doc.id.clone(), "queued".into(), None, None)?;
+            changed(app, &[&doc.id], &[], &[]);
+            Ok(json!({
+                "documentId": doc.id,
+                "title": doc.title,
+                "folderId": doc.folder_id,
+                "filePath": doc.file_path,
+                "ingestStatus": "queued",
+            }))
+        }
+
+        "editNote" => {
+            let id = required_str(args, "documentId")?;
+            let content = args.get("content").and_then(Value::as_str);
+            let edits = args.get("edits").and_then(Value::as_array);
+            match (content, edits) {
+                (Some(_), Some(_)) => return Err("pass either edits or content, not both".into()),
+                (None, None) => return Err("pass edits (preferred) or content".into()),
+                (None, Some(e)) if e.is_empty() => return Err("edits is empty".into()),
+                _ => {}
+            }
+            // Read, edit, and write under one lock — see docs::edit_note.
+            let saved = docs::edit_note(&app.state::<AppState>(), &id, |current| match (content, edits) {
+                (Some(c), _) => Ok(c.to_string()),
+                (None, Some(e)) => apply_edits(current, e),
+                (None, None) => unreachable!("checked above"),
+            })?;
+            if saved.is_none() {
+                return Ok(json!({ "documentId": id, "changed": false }));
+            }
+            chat::upsert_ingest_job(app.state(), id.clone(), "queued".into(), None, None)?;
+            changed(app, &[&id], &[&id], &[]);
+            Ok(json!({ "documentId": id, "changed": true, "ingestStatus": "queued" }))
+        }
+
+        "renameNote" => {
+            let id = required_str(args, "documentId")?;
+            let title = required_str(args, "title")?;
+            docs::get_document(app.state(), id.clone())?
+                .ok_or_else(|| format!("no document with id {id}"))?;
+            let doc = docs::update_document(app.state(), id.clone(), Some(title), None, None, None)?;
+            // The graph's document node carries the title as its label.
+            changed(app, &[], &[], &[id]);
+            Ok(json!({ "documentId": doc.id, "title": doc.title, "filePath": doc.file_path }))
+        }
+
+        "renameFolder" => {
+            let id = required_str(args, "folderId")?;
+            let name = required_str(args, "name")?;
+            require_folder(app, &id)?;
+            docs::rename_folder(app.state(), id.clone(), name)?;
+            // Every note beneath it carries the folder name as a tag.
+            let affected: Vec<String> = {
+                let state = app.state::<AppState>();
+                let conn = state.db.lock();
+                let subtree = docs::folder_subtree_ids(&conn, &id)?;
+                let mut stmt = conn
+                    .prepare("SELECT id FROM document WHERE folder_id = ?1")
+                    .map_err(|e| e.to_string())?;
+                let mut ids = Vec::new();
+                for folder in &subtree {
+                    let rows = stmt.query_map([folder], |r| r.get(0)).map_err(|e| e.to_string())?;
+                    ids.extend(rows.collect::<Result<Vec<String>, _>>().map_err(|e| e.to_string())?);
+                }
+                ids
+            };
+            changed(app, &[], &[], &affected);
+            let folders = docs::list_folders(app.state())?;
+            let paths = folder_paths(&folders);
+            let folder = folders.iter().find(|f| f.id == id).ok_or("folder vanished")?;
+            Ok(json!({
+                "folderId": folder.id,
+                "name": folder.name,
+                "path": paths.get(&folder.id),
+                "notesRetagged": affected.len(),
+            }))
+        }
+
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -434,6 +804,54 @@ mod tests {
         assert_eq!(required_str(&args, "q").unwrap(), "hello");
         assert!(required_str(&args, "blank").is_err());
         assert!(required_str(&args, "absent").is_err());
+    }
+
+    #[test]
+    fn apply_edits_replaces_each_unique_match_in_order() {
+        let edits = json!([
+            { "oldText": "alpha", "newText": "ALPHA" },
+            // Sees the first edit's output.
+            { "oldText": "ALPHA beta", "newText": "done" },
+        ]);
+        assert_eq!(apply_edits("alpha beta gamma", edits.as_array().unwrap()).unwrap(), "done gamma");
+    }
+
+    #[test]
+    fn apply_edits_refuses_missing_or_ambiguous_matches() {
+        let missing = json!([{ "oldText": "zeta", "newText": "x" }]);
+        assert!(apply_edits("alpha", missing.as_array().unwrap()).unwrap_err().contains("not found"));
+        let twice = json!([{ "oldText": "a", "newText": "x" }]);
+        assert!(apply_edits("a a", twice.as_array().unwrap()).unwrap_err().contains("2 times"));
+        let empty = json!([{ "oldText": "", "newText": "x" }]);
+        assert!(apply_edits("a", empty.as_array().unwrap()).is_err());
+    }
+
+    fn folder(id: &str, name: &str, parent: Option<&str>) -> docs::Folder {
+        docs::Folder {
+            id: id.into(),
+            name: name.into(),
+            parent_id: parent.map(Into::into),
+            sort_order: None,
+            created_at: String::new(),
+        }
+    }
+
+    /// The order list_folders returns (sort_order within a level) is kept, and
+    /// each folder is followed by its own subtree — never split by a sibling
+    /// whose name happens to sort between them.
+    #[test]
+    fn folder_tree_lists_depth_first_in_sidebar_order() {
+        let folders = vec![
+            folder("w", "work", None),
+            folder("wn", "work notes", None),
+            folder("p", "projects", Some("w")),
+            folder("a", "apollo", Some("p")),
+        ];
+        let names = |v: Vec<&docs::Folder>| v.iter().map(|f| f.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(folder_tree(&folders, None, false)), ["work", "work notes"]);
+        assert_eq!(names(folder_tree(&folders, None, true)), ["work", "projects", "apollo", "work notes"]);
+        assert_eq!(names(folder_tree(&folders, Some("w"), false)), ["projects"]);
+        assert_eq!(names(folder_tree(&folders, Some("w"), true)), ["projects", "apollo"]);
     }
 
     #[test]
