@@ -9,13 +9,18 @@ import { createNote } from "@/lib/ipc";
 export function CreateNotePrompt({ title, onRefresh }: { title: string; onRefresh: () => void }) {
   const navigate = useNavigate();
   const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
 
   async function onCreate() {
     setBusy(true);
+    setError(null);
     try {
       const document = await createNote(title);
       navigate(`/editor/${document.id}`);
       onRefresh();
+    } catch (e) {
+      // No note has this title, but a folder at the top level might.
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -31,6 +36,7 @@ export function CreateNotePrompt({ title, onRefresh }: { title: string; onRefres
         <Button onClick={onCreate} disabled={busy}>
           {busy ? "Creating…" : `Create "${title}"`}
         </Button>
+        {error && <p className="text-xs text-graph-citation">{error}</p>}
       </Card>
     </div>
   );

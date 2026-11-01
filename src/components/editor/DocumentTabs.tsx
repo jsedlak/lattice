@@ -52,7 +52,7 @@ export function DocumentTabs({
   async function onNewNote() {
     setCreating(true);
     try {
-      const document = await createNote("Untitled note");
+      const document = await createNote("Untitled note", "", null, { numberIfTaken: true });
       navigate(`/editor/${document.id}`);
       setRenameRequest({ kind: "doc", id: document.id });
       onRefresh();
@@ -62,7 +62,7 @@ export function DocumentTabs({
   }
 
   async function onNewFolder() {
-    const folder = await createFolder("New folder", null);
+    const folder = await createFolder("New folder", null, { numberIfTaken: true });
     setRenameRequest({ kind: "folder", id: folder.id });
     onRefresh();
   }

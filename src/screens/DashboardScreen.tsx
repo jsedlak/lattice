@@ -16,7 +16,7 @@ export function DashboardScreen() {
   }, []);
 
   const createNote = async () => {
-    const doc = await ipc.createNote("Untitled note");
+    const doc = await ipc.createNote("Untitled note", "", null, { numberIfTaken: true });
     navigate(`/editor/${doc.id}`);
   };
 

@@ -95,9 +95,13 @@ open with unsaved typing, their text wins.
 [[wikilinks]] in other notes; links to the old title stop resolving, so fix \
 them with editNote if they matter. Renaming a folder changes the tag on every \
 note inside it.
-  - Nothing can be deleted through this server. If a requested title or \
-folder name is taken or contains characters a filename can't, the stored one \
-may differ — use the name in the response."
+  - Names are unique per folder: no two folders, notes or uploads directly \
+inside the same folder (or both at the top level) may share a name, ignoring \
+case. Creating, renaming or moving onto a taken name fails with an error \
+naming what holds it — pick another name, or reuse the existing item.
+  - Nothing can be deleted through this server. In a files-mode workspace a \
+name with characters a filename can't hold is cleaned up, so use the name in \
+the response."
     )
 }
 
@@ -183,8 +187,14 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "listFolders",
-            "description": "List folders with their ids and full paths (e.g. work/projects). Use to find a folderId for createNote or a parentId for createFolder.",
-            "inputSchema": { "type": "object", "properties": {} },
+            "description": "List folders with their ids and full paths (e.g. work/projects). Use to find a folderId for createNote or a parentId for createFolder. Lists one level by default — the top level, or the folders directly inside parentId; pass recursive: true for everything beneath, in tree order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "parentId": { "type": "string", "description": "List inside this folder. Omit for the top level." },
+                    "recursive": { "type": "boolean", "default": false, "description": "Include subfolders at every depth, not just direct children." },
+                },
+            },
         }),
         json!({
             "name": "createFolder",
@@ -325,6 +335,33 @@ fn folder_paths(folders: &[docs::Folder]) -> HashMap<String, String> {
         .collect()
 }
 
+/// The folders under `root` (None = top level) in the sidebar's order: each
+/// level by its manual sort_order, as list_folders returns it, and with
+/// `recursive`, depth-first so every folder is followed by its own subtree. A
+/// sort on the path string can't do this — "work notes" sorts between "work"
+/// and "work/projects", because ' ' < '/'.
+fn folder_tree<'a>(folders: &'a [docs::Folder], root: Option<&str>, recursive: bool) -> Vec<&'a docs::Folder> {
+    let mut out = Vec::new();
+    // Explicit stack rather than recursion; `seen` keeps a corrupt parent cycle
+    // from looping forever.
+    let mut seen = std::collections::HashSet::new();
+    // Reversed so the stack pops them in order.
+    let children = |parent: Option<&str>| -> Vec<&'a docs::Folder> {
+        folders.iter().filter(|f| f.parent_id.as_deref() == parent).rev().collect()
+    };
+    let mut stack = children(root);
+    while let Some(folder) = stack.pop() {
+        if !seen.insert(folder.id.as_str()) {
+            continue;
+        }
+        out.push(folder);
+        if recursive {
+            stack.extend(children(Some(&folder.id)));
+        }
+    }
+    out
+}
+
 /// `create_note`/`create_folder` trust their caller (the tree only offers real
 /// folders); an agent can pass anything, and there is no FK on folder ids, so
 /// a typo would otherwise strand a note in a folder that doesn't exist.
@@ -372,15 +409,6 @@ fn apply_edits(content: &str, edits: &[Value]) -> Result<String, String> {
         }
     }
     Ok(out)
-}
-
-fn require_note<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<docs::Doc, String> {
-    let doc = docs::get_document(app.state(), id.to_string())?
-        .ok_or_else(|| format!("no document with id {id}"))?;
-    if doc.kind != "note" {
-        return Err("that document is an uploaded file; only notes can be edited".into());
-    }
-    Ok(doc)
 }
 
 // ── Query embedding ──────────────────────────────────────────────────────────
@@ -590,20 +618,23 @@ pub fn call<R: Runtime>(app: &AppHandle<R>, name: &str, args: &Value) -> Result<
         }
 
         "listFolders" => {
+            let parent_id = optional_str(args, "parentId");
+            if let Some(id) = &parent_id {
+                require_folder(app, id)?;
+            }
+            let recursive = args.get("recursive").and_then(Value::as_bool).unwrap_or(false);
             let folders = docs::list_folders(app.state())?;
             let paths = folder_paths(&folders);
-            let mut listed: Vec<Value> = folders
-                .iter()
+            let listed: Vec<Value> = folder_tree(&folders, parent_id.as_deref(), recursive)
+                .into_iter()
                 .map(|f| json!({
                     "folderId": f.id,
                     "name": f.name,
                     "parentId": f.parent_id,
                     "path": paths[&f.id],
+                    "childFolders": folders.iter().filter(|c| c.parent_id.as_deref() == Some(&f.id)).count(),
                 }))
                 .collect();
-            // Path order reads as a tree; sort_order is per-parent and means
-            // nothing in a flat list.
-            listed.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
             Ok(json!({ "folders": listed }))
         }
 
@@ -613,7 +644,7 @@ pub fn call<R: Runtime>(app: &AppHandle<R>, name: &str, args: &Value) -> Result<
             if let Some(id) = &parent_id {
                 require_folder(app, id)?;
             }
-            let folder = docs::create_folder(app.state(), name, parent_id)?;
+            let folder = docs::create_folder(app.state(), name, parent_id, None)?;
             changed(app, &[], &[], &[]);
             let paths = folder_paths(&docs::list_folders(app.state())?);
             Ok(json!({
@@ -631,7 +662,7 @@ pub fn call<R: Runtime>(app: &AppHandle<R>, name: &str, args: &Value) -> Result<
             if let Some(id) = &folder_id {
                 require_folder(app, id)?;
             }
-            let doc = docs::create_note(app.state(), title, content, folder_id)?;
+            let doc = docs::create_note(app.state(), title, content, folder_id, None)?;
             // Queue it durably before telling the webview: if the app is closed
             // or the event is missed, resumePendingIngest picks it up at launch.
             chat::upsert_ingest_job(app.state(), doc.id.clone(), "queued".into(), None, None)?;
@@ -649,19 +680,21 @@ pub fn call<R: Runtime>(app: &AppHandle<R>, name: &str, args: &Value) -> Result<
             let id = required_str(args, "documentId")?;
             let content = args.get("content").and_then(Value::as_str);
             let edits = args.get("edits").and_then(Value::as_array);
-            let doc = require_note(app, &id)?;
-            let new_content = match (content, edits) {
+            match (content, edits) {
                 (Some(_), Some(_)) => return Err("pass either edits or content, not both".into()),
                 (None, None) => return Err("pass edits (preferred) or content".into()),
-                (Some(c), None) => c.to_string(),
                 (None, Some(e)) if e.is_empty() => return Err("edits is empty".into()),
-                // get_document read the file in files mode, so edits match what's on disk.
-                (None, Some(e)) => apply_edits(&doc.content, e)?,
-            };
-            if new_content == doc.content {
+                _ => {}
+            }
+            // Read, edit, and write under one lock — see docs::edit_note.
+            let saved = docs::edit_note(&app.state::<AppState>(), &id, |current| match (content, edits) {
+                (Some(c), _) => Ok(c.to_string()),
+                (None, Some(e)) => apply_edits(current, e),
+                (None, None) => unreachable!("checked above"),
+            })?;
+            if saved.is_none() {
                 return Ok(json!({ "documentId": id, "changed": false }));
             }
-            docs::update_document(app.state(), id.clone(), None, Some(new_content), None, None)?;
             chat::upsert_ingest_job(app.state(), id.clone(), "queued".into(), None, None)?;
             changed(app, &[&id], &[&id], &[]);
             Ok(json!({ "documentId": id, "changed": true, "ingestStatus": "queued" }))
@@ -791,6 +824,34 @@ mod tests {
         assert!(apply_edits("a a", twice.as_array().unwrap()).unwrap_err().contains("2 times"));
         let empty = json!([{ "oldText": "", "newText": "x" }]);
         assert!(apply_edits("a", empty.as_array().unwrap()).is_err());
+    }
+
+    fn folder(id: &str, name: &str, parent: Option<&str>) -> docs::Folder {
+        docs::Folder {
+            id: id.into(),
+            name: name.into(),
+            parent_id: parent.map(Into::into),
+            sort_order: None,
+            created_at: String::new(),
+        }
+    }
+
+    /// The order list_folders returns (sort_order within a level) is kept, and
+    /// each folder is followed by its own subtree — never split by a sibling
+    /// whose name happens to sort between them.
+    #[test]
+    fn folder_tree_lists_depth_first_in_sidebar_order() {
+        let folders = vec![
+            folder("w", "work", None),
+            folder("wn", "work notes", None),
+            folder("p", "projects", Some("w")),
+            folder("a", "apollo", Some("p")),
+        ];
+        let names = |v: Vec<&docs::Folder>| v.iter().map(|f| f.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(folder_tree(&folders, None, false)), ["work", "work notes"]);
+        assert_eq!(names(folder_tree(&folders, None, true)), ["work", "projects", "apollo", "work notes"]);
+        assert_eq!(names(folder_tree(&folders, Some("w"), false)), ["projects"]);
+        assert_eq!(names(folder_tree(&folders, Some("w"), true)), ["projects", "apollo"]);
     }
 
     #[test]

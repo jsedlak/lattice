@@ -59,6 +59,20 @@ migrations, WAL mode, foreign keys on).
   uploads, `notes/….md` for files-mode notes), ingest status, manual
   `sort_order`.
 - `folder` — tree via `parent_id`, manual `sort_order`.
+- **Names are unique per folder.** No two items directly inside one folder
+  (or both at the top level) may share a name — folders, notes and uploads
+  alike, trimmed and ignoring case; an upload's name is its title, the file
+  stem the tree shows. Notes and uploads are `[[wikilink]]` targets resolved by
+  title, so a duplicate makes a link ambiguous. Enforced in `docs.rs`
+  (`ensure_name_free`) under the db lock on every create, rename, move
+  (`update_document`, and the tree drags via `reorder_*`, pre-checked before
+  any file moves) and new upload, so the UI and MCP share the rule. A refusal
+  is a user-facing error string; the tree and the editor's title field show
+  it. Placeholders ("Untitled note", "New folder") pass `numberIfTaken` and
+  get "Untitled note 2" instead. Pasting a file whose name is taken by
+  anything other than the same-named upload skips the Replace prompt and
+  numbers it. Existing duplicates aren't migrated; sync and storage-mode
+  switches don't check (disk is what it is).
 - `chunk` — per-document text chunks with token counts and embedding BLOBs
   (f32 little-endian).
 - `node` / `edge` — the graph. Node types: `document`, `tag`, `entity`.
@@ -163,8 +177,10 @@ identity** (no frontmatter, no sidecar metadata). Invariants:
 
 - A note's title **is** its filename stem; a folder's name **is** its
   directory name. Both are sanitized (reserved characters, length, Windows
-  edge cases) and deduped case-insensitively with ` (2)` suffixes
-  (`workspace.rs: sanitize_stem / unique_name / place_note`).
+  edge cases) — and the unique-name rule above is checked against the
+  sanitized name. The ` (2)` dedupe in `workspace.rs` (`sanitize_stem /
+  unique_name / place_note`) remains only as a backstop for files on disk
+  that the db doesn't know about yet.
 - The db `content` column remains as a **cache** serving lists and search;
   it is refreshed by writes and by sync, never by reads.
 
@@ -187,7 +203,8 @@ Canonical-on-disk is enforced at exactly three points:
 
 Consequences accepted by design: an external rename is a delete + new note
 (re-ingest rebuilds graph and embeddings); edits made while the app is running
-surface on next launch (no file watcher in v1); duplicate titles mean a
+surface on next launch (no file watcher in v1); duplicate titles that predate
+the unique-name rule, or that sync picks up in different folders, mean a
 `[[wikilink]]` resolves to the first case-insensitive title match.
 
 Mode switching (`set_storage_mode`): database→files materializes the folder
@@ -269,7 +286,11 @@ and the server with it).
   mode stays disk-first), validating ids first since folder ids have no FK and
   the tree never sends a bad one. `editNote` prefers exact-once find-and-replace
   `edits` over whole-note `content`, all or nothing — a replace-all on an
-  ambiguous snippet is how an agent edits the wrong paragraph unnoticed. Renames
+  ambiguous snippet is how an agent edits the wrong paragraph unnoticed — and
+  reads, edits and writes under one db lock (`docs::edit_note`), so a parallel
+  call or an autosave can't land between the read and the write and be lost.
+  `listFolders` lists one level (top, or inside `parentId`) unless `recursive`,
+  depth-first in sidebar order. Renames
   don't rewrite `[[wikilinks]]` (neither does the tree); the instructions tell
   the agent so. Graph upkeep stays in TypeScript: each write emits
   `mcp-documents-changed` with `ingest` (new/edited text — also given a durable
@@ -279,8 +300,11 @@ and the server with it).
   rename rebuild also refreshes the document node's label); the same event
   (`src/lib/mcp-events.ts`) refreshes the tree and Recent list. An
   open `EditorPane` adopts edited text and remounts its engine (Monaco is
-  uncontrolled) — unless the user has unsaved or in-flight typing, in which case
-  their save wins. With no webview listening, launch-time
+  uncontrolled). An edit that arrives while the user has unsaved typing or a
+  save in flight is deferred, not dropped: it's adopted when the save settles,
+  so stale text never sits on screen waiting to be saved over the agent's work.
+  If the user's pending typing does land after the agent's write, their text
+  wins. With no webview listening, launch-time
   `resumePendingIngest` picks up queued ingest; a missed `rebuild` waits for the
   note's next save. Results are capped (snippets truncated, subgraphs capped at
   200 nodes with `truncated: true`) so a hub tag can't dump the graph into the
