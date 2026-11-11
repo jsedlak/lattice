@@ -12,6 +12,7 @@ import { findDocumentByTitle, getDocument, listDocuments, listFolders } from "@/
 import { layoutBootCache, loadLayoutPrefs, saveLayoutPrefs } from "@/lib/layout-prefs";
 import { invalidateCompletionCaches } from "@/lib/completions";
 import { useMcpDocumentsChanged } from "@/lib/mcp-events";
+import { pruneExpandedFolders } from "@/lib/folder-state";
 import { closeTab, openTab, pruneTabs, useOpenTabIds } from "@/lib/open-tabs";
 import type { Doc, Folder } from "@/lib/types";
 
@@ -111,7 +112,8 @@ export function EditorScreen() {
   React.useEffect(() => {
     if (documents === null) return;
     pruneTabs(new Set(documents.map((d) => d.id)));
-  }, [documents]);
+    pruneExpandedFolders(new Set(folders.map((f) => f.id)));
+  }, [documents, folders]);
 
   // Tab labels come from the document list, so renames land after a refresh().
   const tabDocs = React.useMemo(() => {

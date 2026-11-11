@@ -21,6 +21,9 @@ export interface LayoutPrefs {
   /** Documents open as editor tabs, in tab-bar order. Ids may be stale — the
    * editor prunes ones that no longer resolve. */
   openTabIds: string[];
+  /** Document-tree folders that are open; any other folder is collapsed. Ids
+   * may be stale — the editor prunes ones that no longer resolve. */
+  expandedFolderIds: string[];
 }
 
 export const LAYOUT_DEFAULTS: LayoutPrefs = {
@@ -30,6 +33,7 @@ export const LAYOUT_DEFAULTS: LayoutPrefs = {
   editorSplit: 0.5,
   zoom: 1,
   openTabIds: [],
+  expandedFolderIds: [],
 };
 
 const CACHE_KEY = "lattice.layout";

@@ -23,6 +23,7 @@ import {
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import { folderSubtreeIds } from "@/lib/folder-context";
+import { expandFolders, toggleFolder, useExpandedFolders } from "@/lib/folder-state";
 import { rebuildFolderContext } from "@/lib/graph-build";
 import {
   createFolder,
@@ -88,9 +89,9 @@ export function DocumentTree({
 }) {
   const navigate = useNavigate();
   const confirm = useConfirm();
-  const [expanded, setExpanded] = React.useState<Set<string>>(
-    () => new Set(folders.map((f) => f.id)),
-  );
+  // Collapsed by default, remembered across screens and relaunches — see
+  // lib/folder-state.ts.
+  const expanded = useExpandedFolders();
   const [renaming, setRenaming] = React.useState<RenameRequest | null>(null);
   // Files an import rejected (unsupported type, unreadable) — shown above the tree.
   const [treeError, setTreeError] = React.useState<string | null>(null);
@@ -104,6 +105,23 @@ export function DocumentTree({
   const dragRef = React.useRef<DragPayload | null>(null);
   // Swallow the click that immediately follows a drop.
   const suppressClick = React.useRef(false);
+
+  // Reveal the selected document: open every folder on its path, so a note
+  // reached from a tab, a link, Recent or the graph isn't hidden in a collapsed
+  // folder. Once per selection — collapsing its folder afterwards sticks.
+  const revealed = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!selectedId || revealed.current === selectedId) return;
+    const doc = documents.find((d) => d.id === selectedId);
+    if (!doc) return;
+    revealed.current = selectedId;
+    const parentOf = new Map(folders.map((f) => [f.id, f.parentId ?? null]));
+    const path: string[] = [];
+    for (let id = doc.folderId ?? null; id && !path.includes(id); id = parentOf.get(id) ?? null) {
+      path.push(id);
+    }
+    expandFolders(...path);
+  }, [selectedId, documents, folders]);
 
   // The parent asked for an inline rename (new note / new folder buttons).
   React.useEffect(() => {
@@ -132,14 +150,6 @@ export function DocumentTree({
     return m;
   }, [documents]);
 
-  function toggle(id: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
 
   /** Runs a tree mutation and shows a refusal — most often a name the
    *  destination folder already has — rather than dropping it silently. */
@@ -155,8 +165,8 @@ export function DocumentTree({
 
   async function newFolder(parentId: string | null) {
     const folder = await createFolder("New folder", parentId, { numberIfTaken: true });
-    if (parentId) setExpanded((p) => new Set(p).add(parentId));
-    setExpanded((p) => new Set(p).add(folder.id));
+    if (parentId) expandFolders(parentId);
+    expandFolders(folder.id);
     setRenaming({ kind: "folder", id: folder.id });
     onRefresh();
   }
@@ -168,7 +178,7 @@ export function DocumentTree({
       if (paths.length === 0) return;
       const { errors } = await importUploads(paths, folderId);
       setTreeError(errors.length > 0 ? describeImportErrors(errors) : null);
-      if (folderId) setExpanded((p) => new Set(p).add(folderId));
+      if (folderId) expandFolders(folderId);
       onRefresh();
     },
     [onRefresh],
@@ -199,7 +209,7 @@ export function DocumentTree({
 
   async function newNoteIn(folderId: string | null) {
     const document = await createNote("Untitled note", "", folderId, { numberIfTaken: true });
-    if (folderId) setExpanded((p) => new Set(p).add(folderId));
+    if (folderId) expandFolders(folderId);
     navigate(`/editor/${document.id}`);
     setRenaming({ kind: "doc", id: document.id });
     onRefresh();
@@ -343,7 +353,7 @@ export function DocumentTree({
         const ids = docIdsIn(into).filter((id) => id !== docId);
         ids.push(docId);
         await reorderDocuments(into, ids);
-        if (into) setExpanded((p) => new Set(p).add(into));
+        if (into) expandFolders(into);
       }
       // A reorder within the same folder doesn't change the note's path.
       if (dest !== from) await rebuildFolderContext([docId]);
@@ -364,7 +374,7 @@ export function DocumentTree({
           const ids = folderIdsIn(spot.id).filter((id) => id !== folderId);
           ids.push(folderId);
           await reorderFolders(spot.id, ids);
-          setExpanded((p) => new Set(p).add(spot.id));
+          expandFolders(spot.id);
         } else {
           dest = target.parentId ?? null;
           const ids = folderIdsIn(dest).filter((id) => id !== folderId);
@@ -562,7 +572,7 @@ export function DocumentTree({
               {(hover === "before" || hover === "after") && <DropLine pos={hover} />}
               <button
                 type="button"
-                onClick={() => !suppressClick.current && toggle(folder.id)}
+                onClick={() => !suppressClick.current && toggleFolder(folder.id)}
                 className="text-faint"
               >
                 {isOpen ? (
@@ -591,7 +601,7 @@ export function DocumentTree({
                 <button
                   type="button"
                   className="flex-1 truncate text-left"
-                  onClick={() => !suppressClick.current && toggle(folder.id)}
+                  onClick={() => !suppressClick.current && toggleFolder(folder.id)}
                 >
                   {folder.name}
                 </button>
